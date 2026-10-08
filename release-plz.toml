@@ -12,6 +12,9 @@ git_tag_name = "v{{ version }}"
 pr_labels = ["release"]
 # cargo-semver-checks compares the public API against the published version.
 semver_check = true
+# Only these commits make a release. A ci, chore, test, style or build commit
+# changes nothing users get, and a release PR for it alone would carry no notes.
+release_commits = "^(feat|fix|perf|refactor|docs|revert)[(:!]"
 # The default body opens with an emoji and ends with a tool credit, both of which
 # the fells-code standards keep out of PRs.
 pr_body = """
