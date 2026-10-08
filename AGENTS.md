@@ -89,5 +89,15 @@ the conformance suite is the arbiter: change the suite deliberately, never the a
 
 ## Releases
 
-Published to crates.io from a `vX.Y.Z` tag. Pre-1.0: a breaking change is a minor bump, and 1.0 is
-a deliberate decision, not a side effect.
+Automated by release-plz (`release-plz.toml`, `.github/workflows/release.yml`). Do not bump the
+version, edit the changelog's released sections, or tag by hand:
+
+- Every push to `main` opens or updates a `chore: release vX.Y.Z` PR. The version and changelog
+  come from Conventional Commits since the last tag, so the commit type is the release note:
+  `fix:` bumps the patch version, `feat:` or a breaking change (`feat!:`, `BREAKING CHANGE:`) the
+  minor version while pre-1.0. `cargo-semver-checks` flags a breaking API change that the commits
+  did not declare.
+- Merging that PR tests the crate, publishes it to crates.io through trusted publishing (no token
+  in the repository), tags `vX.Y.Z`, and creates the GitHub release.
+
+Pre-1.0: a breaking change is a minor bump, and 1.0 is a deliberate decision, not a side effect.

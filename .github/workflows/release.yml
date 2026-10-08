@@ -1,0 +1,74 @@
+# Releases with release-plz (configured in release-plz.toml).
+#
+# On every push to main, the release-pr job opens or updates a release PR with the
+# next version and changelog. Merging it runs the release job, which tests the
+# crate, publishes it to crates.io, tags vX.Y.Z and creates the GitHub release.
+#
+# Publishing uses crates.io trusted publishing (OIDC): no registry token is stored
+# in this repository. The crate's trusted publisher on crates.io names this
+# repository and this workflow file.
+#
+# Release PRs are opened with the default GITHUB_TOKEN, so CI does not run on
+# them. They change only the version, Cargo.lock and the changelog, and the
+# release job runs the full checks before it publishes.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'fells-code'
+    permissions:
+      contents: write
+      pull-requests: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Checks
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - uses: release-plz/action@v0.5.140
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-pr:
+    name: Release PR
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'fells-code'
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5.140
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
