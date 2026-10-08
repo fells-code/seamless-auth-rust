@@ -1,6 +1,6 @@
 [package]
 name = "seamless-auth"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Seamless Auth server adapter for Axum: cookie and bearer sessions in front of the Seamless Auth API"
