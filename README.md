@@ -138,6 +138,24 @@ asks the API for the message and hands it to you:
 
 A delivery error answers the request with 502 `delivery_failed`.
 
+### The admin console
+
+`console_router()` serves the Seamless admin dashboard from your API, proxied from the auth API, so
+it shares the origin and cookie scope of the `/auth` routes. It serves `/console`, the path the
+dashboard is built against, so merge it (a router nested at `/console` never sees `/console/`):
+
+```rust
+let app = Router::new()
+    .nest("/auth", auth.router())
+    .merge(auth.console_router());
+```
+
+It serves `GET` and `HEAD` only and forwards nothing but the method and path, so the browser's
+cookies never reach the upstream. It refuses any path that could leave the console (dot segments,
+encoded separators), and follows a redirect only while it stays inside the console on the auth API.
+When you serve it, add your API's origin to the auth server's `ORIGINS` so passkey ceremonies
+started in the console verify.
+
 ## Features
 
 | Feature | Default | Purpose |

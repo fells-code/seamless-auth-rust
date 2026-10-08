@@ -37,6 +37,7 @@
 
 mod adapter;
 mod client_ip;
+mod console;
 mod cookies;
 mod delivery;
 mod guard;

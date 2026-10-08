@@ -207,7 +207,7 @@ fn segments(path: &str) -> Vec<&str> {
 
 /// Decodes a path segment. Refuses a malformed escape or a result that is not
 /// UTF-8, as Go's `url.PathUnescape` does.
-fn percent_decode(segment: &str) -> Option<String> {
+pub(crate) fn percent_decode(segment: &str) -> Option<String> {
     let bytes = segment.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

@@ -67,6 +67,7 @@ so CI builds what was tested.
   `POST /refresh`, logout.
 - `src/manifest.rs`: parsing, matching, the live and embedded manifest.
 - `src/guard.rs`: `require_auth`, `authenticate`, the `User` extractor.
+- `src/console.rs`: `console_router`, the admin dashboard proxy.
 - `src/cookies.rs`, `src/jwt.rs`, `src/jwks.rs`, `src/service_token.rs`: HS256 cookies and service
   tokens, RS256 against the API's JWKS.
 - `src/tests/`: unit tests against a fake auth API.
