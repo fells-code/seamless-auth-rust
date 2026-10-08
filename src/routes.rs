@@ -35,7 +35,7 @@ impl Inner {
         forwarded: &Forwarded,
         kind: &str,
         bearer: bool,
-    ) -> Result<Credential, Reply> {
+    ) -> Result<Credential, Box<Reply>> {
         if kind == "none" {
             return Ok(Credential {
                 authorization: None,
@@ -49,10 +49,10 @@ impl Inner {
                     authorization: Some(format!("Bearer {token}")),
                     set: Vec::new(),
                 }),
-                None => Err(Reply::error(
+                None => Err(Box::new(Reply::error(
                     StatusCode::UNAUTHORIZED,
                     &format!("{kind} session required"),
-                )),
+                ))),
             };
         }
 
@@ -87,27 +87,23 @@ impl Inner {
                 Err(SilentRefreshError::NoRefreshCookie) => {}
                 Err(SilentRefreshError::Failed(err)) => {
                     tracing::debug!("[seamless-auth] Silent refresh failed: {err}");
-                    return Err(Reply::error(StatusCode::UNAUTHORIZED, "Refresh failed")
-                        .with_clear(vec![
+                    return Err(Box::new(
+                        Reply::error(StatusCode::UNAUTHORIZED, "Refresh failed").with_clear(vec![
                             self.config.access_cookie_name.clone(),
                             self.config.registration_cookie_name.clone(),
                             self.config.refresh_cookie_name.clone(),
-                        ]));
+                        ]),
+                    ));
                 }
             }
         }
 
-        if has_cookie {
-            Err(Reply::error(
-                StatusCode::UNAUTHORIZED,
-                &format!("Invalid or expired {name} cookie"),
-            ))
+        let message = if has_cookie {
+            format!("Invalid or expired {name} cookie")
         } else {
-            Err(Reply::error(
-                StatusCode::UNAUTHORIZED,
-                &format!("Missing required cookie \"{name}\""),
-            ))
-        }
+            format!("Missing required cookie \"{name}\"")
+        };
+        Err(Box::new(Reply::error(StatusCode::UNAUTHORIZED, &message)))
     }
 
     /// Checks the token in a session response: signed by the auth API, of the
@@ -171,7 +167,7 @@ impl Inner {
             .await
         {
             Ok(credential) => credential,
-            Err(rejected) => return rejected,
+            Err(rejected) => return *rejected,
         };
         let set = credential.set;
 
