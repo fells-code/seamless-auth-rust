@@ -1,0 +1,55 @@
+[package]
+name = "seamless-auth"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Seamless Auth server adapter for Axum: cookie and bearer sessions in front of the Seamless Auth API"
+license = "Apache-2.0"
+repository = "https://github.com/fells-code/seamless-auth-rust"
+homepage = "https://github.com/fells-code/seamless-auth-api"
+readme = "README.md"
+keywords = ["auth", "passkeys", "axum", "session", "webauthn"]
+categories = ["authentication", "web-programming::http-server"]
+include = ["src/**/*.rs", "!src/tests/**", "manifest.json", "README.md", "LICENSE", "Cargo.toml"]
+
+[lib]
+name = "seamless_auth"
+
+[features]
+default = ["rustls"]
+# TLS for reaching the auth API over https. Pick one, or neither for plain http.
+rustls = ["reqwest/rustls"]
+native-tls = ["reqwest/native-tls"]
+
+[dependencies]
+# The router, extractors and ConnectInfo the adapter plugs into.
+axum = { version = "0.8.4", default-features = false, features = ["tokio"] }
+# Reads a request body with a size limit. Already in axum's tree.
+http-body-util = "0.1.2"
+# Upstream calls to the auth API, with a streaming response body for downloads.
+reqwest = { version = "0.13.1", default-features = false }
+# HS256 cookies and service tokens, RS256 verification against the API's JWKS.
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs"] }
+serde = { version = "1.0.200", features = ["derive"] }
+serde_json = "1.0.120"
+# Refresh sharing, the manifest and JWKS caches, and timeouts.
+tokio = { version = "1.38", features = ["sync", "time", "rt"] }
+# The RequireAuth layer, so the guard works on any tower stack. Already in axum's tree.
+tower-layer = "0.3.3"
+tower-service = "0.3.3"
+# The Expires attribute on cookies. Already in hyper's tree.
+httpdate = "1.0.3"
+tracing = { version = "0.1.40", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+axum = { version = "0.8.4", default-features = false, features = ["tokio", "http1", "json"] }
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "net"] }
+# The fake auth API in the tests signs RS256 with a PEM test key.
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+
+# The reference app the conformance suite drives. A test fixture, not an example
+# deployment: /__captured exposes one-time codes.
+[[example]]
+name = "refapp"
+path = "conformance/refapp/main.rs"

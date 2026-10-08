@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: ['1.88', 'stable']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        if: matrix.rust == 'stable'
+        run: cargo fmt --check
+      # Lints change between releases, so they gate on stable only.
+      - name: clippy
+        if: matrix.rust == 'stable'
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --no-default-features -- -D warnings
+          cargo clippy --locked --all-targets --no-default-features --features native-tls -- -D warnings
+      - run: cargo test --locked
+
+  # The adapter conformance suite from seamless-cli, against the reference app in
+  # conformance/refapp: the same specs the Express, Fastify and Go adapters pass.
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: seamless-auth-rust
+      - uses: actions/checkout@v4
+        with:
+          repository: fells-code/seamless-auth-api
+          path: seamless-auth-api
+      - uses: actions/checkout@v4
+        with:
+          repository: fells-code/seamless-cli
+          path: seamless-cli
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: seamless-auth-rust
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build the CLI
+        working-directory: seamless-cli
+        run: npm ci && npm run build
+      - name: Start the reference app
+        working-directory: seamless-auth-rust
+        env:
+          PORT: '8080'
+          AUTH_SERVER_URL: http://localhost:5312
+          AUTH_SERVER_ISSUER: http://auth-api:5312
+          API_SERVICE_TOKEN: verify-dev-service-token-not-a-real-secret
+          COOKIE_SIGNING_KEY: verify-dev-service-token-not-a-real-secret
+          JWKS_KID: dev-main
+        run: |
+          cargo build --locked --example refapp
+          nohup ./target/debug/examples/refapp > refapp.log 2>&1 &
+      - name: Conformance
+        env:
+          SEAMLESS_API_DIR: ${{ github.workspace }}/seamless-auth-api
+        run: node seamless-cli/dist/index.js verify --adapter-url=http://localhost:8080
+      - name: Reference app log
+        if: always()
+        run: cat seamless-auth-rust/refapp.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-results
+          path: seamless-cli/verify/harness/results/
+          if-no-files-found: ignore
