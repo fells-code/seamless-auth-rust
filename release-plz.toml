@@ -1,0 +1,47 @@
+# Releases are automated by release-plz (.github/workflows/release.yml). Every
+# push to main opens or updates a release PR that bumps the version and the
+# changelog from the Conventional Commits since the last tag. Merging that PR
+# publishes to crates.io, tags vX.Y.Z and creates the GitHub release.
+[workspace]
+# Publish only from a merged release PR, never on an ordinary push.
+release_always = false
+# Pre-1.0: a feature or a breaking change bumps the minor version, a fix the
+# patch version.
+features_always_increment_minor = true
+git_tag_name = "v{{ version }}"
+pr_labels = ["release"]
+# cargo-semver-checks compares the public API against the published version.
+semver_check = true
+# The default body opens with an emoji and ends with a tool credit, both of which
+# the fells-code standards keep out of PRs.
+pr_body = """
+## Release
+
+{% for release in releases -%}
+- `{{ release.package }}`: {% if release.previous_version and release.previous_version != release.next_version %}{{ release.previous_version }} -> {% endif %}{{ release.next_version }}{% if release.semver_check == "incompatible" %} (API breaking changes){% elif release.semver_check == "compatible" %} (API compatible){% endif %}
+{% endfor %}
+{%- for release in releases %}{% if release.breaking_changes %}
+### Breaking changes in `{{ release.package }}`
+
+```text
+{{ release.breaking_changes }}
+```
+{% endif %}{% endfor %}
+{%- for release in releases %}{% if release.title and release.changelog %}
+### {{ release.title }}
+{{ release.changelog }}
+{% endif %}{% endfor %}
+Merging this PR publishes the crate to crates.io, tags the release and creates the GitHub release.
+"""
+
+[changelog]
+protect_breaking_commits = true
+commit_parsers = [
+    { message = "^feat", group = "added" },
+    { message = "^fix", group = "fixed" },
+    { message = "^perf", group = "performance" },
+    { message = "^refactor", group = "changed" },
+    { message = "^docs", group = "documentation" },
+    { message = "^(ci|chore|test|style|build)", skip = true },
+    { message = "^.*", group = "other" },
+]
