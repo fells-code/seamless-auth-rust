@@ -48,6 +48,7 @@ pub(crate) struct Inner {
     pub manifest: ManifestSource,
     pub tokens: ServiceTokens,
     pub refreshes: Arc<Refresher>,
+    pub console_client: std::sync::OnceLock<Option<reqwest::Client>>,
 }
 
 impl Adapter {
@@ -71,6 +72,7 @@ impl Adapter {
                 manifest,
                 tokens,
                 refreshes: Arc::default(),
+                console_client: std::sync::OnceLock::new(),
             }),
         }
     }

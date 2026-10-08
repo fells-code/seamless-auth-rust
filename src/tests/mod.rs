@@ -2,6 +2,7 @@
 
 mod adapter;
 mod client_ip;
+mod console;
 mod guard;
 mod manifest;
 
