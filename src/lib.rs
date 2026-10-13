@@ -13,7 +13,7 @@
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let auth = Adapter::builder(std::env::var("AUTH_SERVER_URL")?)
 //!     .cookie_secret(std::env::var("COOKIE_SECRET")?)
-//!     .service_secret(std::env::var("SERVICE_SECRET")?)
+//!     .service_secret(std::env::var("SEAMLESS_SERVICE_TOKEN")?)
 //!     .jwks_kid(std::env::var("JWKS_KID")?)
 //!     .build()?;
 //!

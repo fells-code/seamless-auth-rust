@@ -154,8 +154,9 @@ impl Builder {
         self
     }
 
-    /// Signs the service tokens the auth API trusts this adapter by. It is the
-    /// API's `API_SERVICE_TOKEN`. At least 32 bytes. Required.
+    /// Signs the service tokens the auth API trusts this adapter by. It holds the
+    /// same value as the API's `API_SERVICE_TOKEN`; apps conventionally read it
+    /// from `SEAMLESS_SERVICE_TOKEN`. At least 32 bytes. Required.
     pub fn service_secret(mut self, secret: impl Into<String>) -> Self {
         self.service_secret = secret.into();
         self
