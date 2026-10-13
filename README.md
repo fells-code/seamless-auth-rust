@@ -39,7 +39,7 @@ use serde_json::json;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth = Adapter::builder(std::env::var("AUTH_SERVER_URL")?)
         .cookie_secret(std::env::var("COOKIE_SECRET")?) // at least 32 bytes
-        .service_secret(std::env::var("SERVICE_SECRET")?) // the API's API_SERVICE_TOKEN
+        .service_secret(std::env::var("SEAMLESS_SERVICE_TOKEN")?) // same value as the API's API_SERVICE_TOKEN
         .jwks_kid(std::env::var("JWKS_KID")?)
         .build()?;
 
@@ -59,6 +59,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+The auth server reads the service token from `API_SERVICE_TOKEN` and your app reads it from
+`SEAMLESS_SERVICE_TOKEN`; both hold the same value.
 
 Serve with `into_make_service_with_connect_info::<SocketAddr>()`. Without it the adapter has no
 peer address and forwards no client address to the auth API.
@@ -93,7 +96,7 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `auth_server_issuer` | the URL | Expected `iss` of the API's tokens, when it differs from the URL you reach it at |
 | `audience` | the issuer | Expected `aud` of the API's tokens |
 | `cookie_secret` | required | Signs the session cookies (32 bytes or more) |
-| `service_secret` | required | The API's `API_SERVICE_TOKEN` (32 bytes or more) |
+| `service_secret` | required | The service token, read from `SEAMLESS_SERVICE_TOKEN` in the examples; the same value as the API's `API_SERVICE_TOKEN` (32 bytes or more) |
 | `jwks_kid` | `dev-main` | `kid` header on service tokens |
 | `cookie_domain` | none | Cookie `Domain` |
 | `insecure_cookies` | `false` | Drops `Secure`, for local development over HTTP |
@@ -180,7 +183,7 @@ Docker, a checkout of `seamless-auth-api` and the `seamless` CLI:
 
 ```bash
 PORT=8080 AUTH_SERVER_URL=http://localhost:5312 AUTH_SERVER_ISSUER=http://auth-api:5312 \
-  API_SERVICE_TOKEN=verify-dev-service-token-not-a-real-secret \
+  SEAMLESS_SERVICE_TOKEN=verify-dev-service-token-not-a-real-secret \
   COOKIE_SIGNING_KEY=verify-dev-service-token-not-a-real-secret JWKS_KID=dev-main \
   cargo run --example refapp &
 

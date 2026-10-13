@@ -70,7 +70,7 @@ jobs:
           PORT: '8080'
           AUTH_SERVER_URL: http://localhost:5312
           AUTH_SERVER_ISSUER: http://auth-api:5312
-          API_SERVICE_TOKEN: verify-dev-service-token-not-a-real-secret
+          SEAMLESS_SERVICE_TOKEN: verify-dev-service-token-not-a-real-secret
           COOKIE_SIGNING_KEY: verify-dev-service-token-not-a-real-secret
           JWKS_KID: dev-main
         run: |
