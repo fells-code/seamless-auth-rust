@@ -23,7 +23,7 @@ async fn main() {
     let auth = Adapter::builder(env("AUTH_SERVER_URL"))
         .auth_server_issuer(env("AUTH_SERVER_ISSUER"))
         .cookie_secret(env("COOKIE_SIGNING_KEY"))
-        .service_secret(env("API_SERVICE_TOKEN"))
+        .service_secret(env("SEAMLESS_SERVICE_TOKEN"))
         .jwks_kid(env("JWKS_KID"))
         .deliver(move |d: Delivery| {
             let sink = sink.clone();
