@@ -18,6 +18,11 @@ use crate::jwt::{Claims, str_claim};
 use crate::manifest::RouteMatch;
 use crate::refresh::SilentRefreshError;
 
+// The auth API consumes a magic link on the device that requested it, which it
+// recognises by that flow's pre-auth token. The token is optional: without it
+// the API asks for confirmation instead, so its absence is never a 401 here.
+const MAGIC_LINK_VERIFY: (&str, &str) = ("GET", "/magic-link/verify/{token}");
+
 /// What the adapter sends for a route, and any cookies a silent refresh
 /// produced on the way.
 pub(crate) struct Credential {
@@ -106,6 +111,22 @@ impl Inner {
         Err(Box::new(Reply::error(StatusCode::UNAUTHORIZED, &message)))
     }
 
+    fn optional_pre_auth(&self, headers: &HeaderMap, bearer: bool) -> Credential {
+        let token = if bearer {
+            bearer_token(headers).map(|token| token.to_string())
+        } else {
+            let name = self.config.cookie_name("preAuth");
+            read_cookie(&self.config, headers, name, cookie_kind("preAuth"))
+                .map(|payload| str_claim(&payload, "token").to_string())
+        };
+        Credential {
+            authorization: token
+                .filter(|token| !token.is_empty())
+                .map(|token| format!("Bearer {token}")),
+            set: Vec::new(),
+        }
+    }
+
     /// Checks the token in a session response: signed by the auth API, of the
     /// expected type, and belonging to the subject the body names. Returns the
     /// session id. A response that fails any of these is one this adapter cannot
@@ -162,12 +183,16 @@ impl Inner {
             return Reply::error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
         }
 
-        let credential = match self
-            .credential_for(&parts.headers, forwarded, &route.credential, bearer)
-            .await
-        {
-            Ok(credential) => credential,
-            Err(rejected) => return *rejected,
+        let credential = if (route.method.as_str(), route.path.as_str()) == MAGIC_LINK_VERIFY {
+            self.optional_pre_auth(&parts.headers, bearer)
+        } else {
+            match self
+                .credential_for(&parts.headers, forwarded, &route.credential, bearer)
+                .await
+            {
+                Ok(credential) => credential,
+                Err(rejected) => return *rejected,
+            }
         };
         let set = credential.set;
 

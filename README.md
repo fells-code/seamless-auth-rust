@@ -141,6 +141,20 @@ asks the API for the message and hands it to you:
 
 A delivery error answers the request with 502 `delivery_failed`.
 
+### Magic links
+
+The auth API signs a user in from a magic link only on the device that asked for it. On
+`GET /magic-link/verify/{token}` the adapter forwards that device's pre-auth token when it has
+one: the client's own bearer token in bearer transport, or the pre-auth cookie in cookie
+transport if it verifies. Without one it sends none, and never answers 401, because the API
+falls back to the client address and user agent the adapter forwards.
+
+Opened anywhere else, the link answers 409 `confirmation_required`, with `requestedFrom`
+(`deviceClass`, `requestedAt`) describing the request, and is not consumed. Once the user
+approves it, `POST /magic-link/verify/{token}/confirm` consumes it. The requesting attempt's
+first `GET /magic-link/check` after that issues the session; later checks answer
+`{ "message": "Success" }` with no tokens, and the adapter then leaves the cookies as they are.
+
 ### The admin console
 
 `console_router()` serves the Seamless admin dashboard from your API, proxied from the auth API, so
