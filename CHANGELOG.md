@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/fells-code/seamless-auth-rust/compare/v0.2.0...v0.2.1) - 2026-10-18
+
+### Documentation
+
+- name the app-side service token SEAMLESS_SERVICE_TOKEN
+
+### Fixed
+
+- forward the pre-auth token on magic link verify and serve the confirm route ([#8](https://github.com/fells-code/seamless-auth-rust/pull/8))
+
 ## [0.2.0](https://github.com/fells-code/seamless-auth-rust/compare/v0.1.0...v0.2.0) - 2026-10-08
 
 ### Added
