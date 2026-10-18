@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "apiVersion": "0.17.0",
+  "apiVersion": "0.18.0",
   "session": {
     "subject": "sub",
     "token": "token",
@@ -98,6 +98,7 @@
     { "method": "POST", "path": "/magic-link", "credential": "preAuth", "delivery": true },
     { "method": "GET", "path": "/magic-link/check", "credential": "preAuth", "issues": "session" },
     { "method": "GET", "path": "/magic-link/verify/{token}", "credential": "none" },
+    { "method": "POST", "path": "/magic-link/verify/{token}/confirm", "credential": "none" },
     {
       "method": "POST",
       "path": "/oauth/{providerId}/callback",

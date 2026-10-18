@@ -4,6 +4,7 @@ mod adapter;
 mod client_ip;
 mod console;
 mod guard;
+mod magic_link;
 mod manifest;
 
 use std::collections::HashMap;
