@@ -27,6 +27,10 @@ pub struct User {
     pub phone: Option<String>,
     /// The auth API access token, for calling the API on the user's behalf.
     pub token: String,
+    /// A recovery session: signed in with a recovery code or self-service
+    /// recovery, and able to do little but enroll a new passkey or authenticator
+    /// app. [`Adapter::require_auth`] refuses one unless told otherwise.
+    pub recovery: bool,
 }
 
 // The token is a live credential, so it stays out of logs that print a User.
@@ -38,6 +42,7 @@ impl fmt::Debug for User {
             .field("email", &self.email)
             .field("phone", &self.phone)
             .field("token", &"[redacted]")
+            .field("recovery", &self.recovery)
             .finish()
     }
 }
@@ -81,15 +86,24 @@ impl Adapter {
     /// cookie wins when present. It reads the `Cookie` header itself, so it works
     /// on any route. It does not refresh: silent refresh belongs to the auth
     /// routes, and a bearer client refreshes through `POST /auth/refresh` itself.
+    ///
+    /// It accepts a recovery session, so check [`User::recovery`] before treating
+    /// the user as fully signed in.
     pub async fn authenticate(&self, headers: &HeaderMap) -> Result<User, Unauthenticated> {
         self.inner.authenticate(headers).await.map(|(user, _)| user)
     }
 
     /// A layer that answers 401 unless the request carries a valid session, and
     /// puts the [`User`] in the request extensions for the handler behind it.
+    ///
+    /// A recovery session answers 403 `{"error":"enrollment_required"}`, so an
+    /// account that is only part way through recovery is not taken for signed in.
+    /// [`RequireAuthLayer::allow_recovery`] lets one through, for the screens that
+    /// guide the user to enroll.
     pub fn require_auth(&self) -> RequireAuthLayer {
         RequireAuthLayer {
             inner: self.inner.clone(),
+            allow_recovery: false,
         }
     }
 }
@@ -106,7 +120,9 @@ impl Inner {
             if str_claim(&claims, "sub").is_empty() || !is_access_token(token) {
                 return Err(Unauthenticated);
             }
-            return Ok((user_from(&claims, token), true));
+            let mut user = user_from(&claims, token);
+            user.recovery = unverified_claims(token).is_some_and(|inner| is_recovery(&inner));
+            return Ok((user, true));
         }
 
         let token = bearer_token(headers).ok_or(Unauthenticated)?;
@@ -135,6 +151,10 @@ fn is_access_token(token: &str) -> bool {
     unverified_claims(token).is_some_and(|claims| str_claim(&claims, "typ") == "access")
 }
 
+pub(crate) fn is_recovery(claims: &Claims) -> bool {
+    claims.get("recovery") == Some(&Value::Bool(true))
+}
+
 fn user_from(claims: &Claims, token: &str) -> User {
     let optional = |name: &str| {
         Some(str_claim(claims, name))
@@ -157,6 +177,7 @@ fn user_from(claims: &Claims, token: &str) -> User {
         email: optional("email"),
         phone: optional("phone"),
         token: token.to_string(),
+        recovery: is_recovery(claims),
     }
 }
 
@@ -164,11 +185,24 @@ fn user_from(claims: &Claims, token: &str) -> User {
 #[derive(Clone)]
 pub struct RequireAuthLayer {
     inner: Arc<Inner>,
+    allow_recovery: bool,
+}
+
+impl RequireAuthLayer {
+    /// Lets a recovery session through instead of answering 403
+    /// `enrollment_required`. The handler can still tell it apart by
+    /// [`User::recovery`].
+    pub fn allow_recovery(mut self, allow: bool) -> Self {
+        self.allow_recovery = allow;
+        self
+    }
 }
 
 impl fmt::Debug for RequireAuthLayer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RequireAuthLayer").finish_non_exhaustive()
+        f.debug_struct("RequireAuthLayer")
+            .field("allow_recovery", &self.allow_recovery)
+            .finish_non_exhaustive()
     }
 }
 
@@ -178,6 +212,7 @@ impl<S> Layer<S> for RequireAuthLayer {
     fn layer(&self, service: S) -> Self::Service {
         RequireAuth {
             adapter: self.inner.clone(),
+            allow_recovery: self.allow_recovery,
             service,
         }
     }
@@ -187,6 +222,7 @@ impl<S> Layer<S> for RequireAuthLayer {
 #[derive(Clone)]
 pub struct RequireAuth<S> {
     adapter: Arc<Inner>,
+    allow_recovery: bool,
     service: S,
 }
 
@@ -216,6 +252,7 @@ where
         let clone = self.service.clone();
         let mut service = std::mem::replace(&mut self.service, clone);
         let adapter = self.adapter.clone();
+        let allow_recovery = self.allow_recovery;
 
         Box::pin(async move {
             match adapter.authenticate(req.headers()).await {
@@ -229,6 +266,10 @@ where
                         &json!({ "error": "cross_site_request_blocked" }),
                     ))
                 }
+                Ok((user, _)) if user.recovery && !allow_recovery => Ok(json_response(
+                    StatusCode::FORBIDDEN,
+                    &json!({ "error": "enrollment_required" }),
+                )),
                 Ok((user, _)) => {
                     req.extensions_mut().insert(user);
                     service.call(req).await.map(IntoResponse::into_response)

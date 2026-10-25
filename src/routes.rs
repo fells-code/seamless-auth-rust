@@ -14,7 +14,8 @@ use crate::cookies::{
     CookieWrite, cookie_kind, ephemeral_cookie, raw_cookie, read_cookie, session_cookies,
 };
 use crate::delivery::parse_delivery;
-use crate::jwt::{Claims, str_claim};
+use crate::guard::is_recovery;
+use crate::jwt::{Claims, str_claim, unverified_claims};
 use crate::manifest::RouteMatch;
 use crate::refresh::SilentRefreshError;
 
@@ -22,6 +23,13 @@ use crate::refresh::SilentRefreshError;
 // recognises by that flow's pre-auth token. The token is optional: without it
 // the API asks for confirmation instead, so its absence is never a 401 here.
 const MAGIC_LINK_VERIFY: (&str, &str) = ("GET", "/magic-link/verify/{token}");
+
+// Enrolling a factor lifts a recovery session's restriction at the auth API, but
+// the access token keeps its recovery claim until it is refreshed.
+const ENROLLMENT_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/webauthn/register/finish"),
+    ("POST", "/totp/enroll/verify"),
+];
 
 /// What the adapter sends for a route, and any cookies a silent refresh
 /// produced on the way.
@@ -194,6 +202,14 @@ impl Inner {
                 Err(rejected) => return *rejected,
             }
         };
+        let after_recovery_enrollment = !bearer
+            && ENROLLMENT_ROUTES.contains(&(route.method.as_str(), route.path.as_str()))
+            && credential
+                .authorization
+                .as_deref()
+                .and_then(|a| a.strip_prefix("Bearer "))
+                .and_then(unverified_claims)
+                .is_some_and(|claims| is_recovery(&claims));
         let set = credential.set;
 
         let Ok(method) = Method::from_bytes(route.method.as_bytes()) else {
@@ -307,7 +323,52 @@ impl Inner {
             )),
             data => data,
         };
+        if after_recovery_enrollment {
+            self.drop_recovery_claim(&parts.headers, forwarded, &mut reply)
+                .await;
+        }
         reply
+    }
+
+    /// Refreshes the session after a recovery session enrolled a factor, so the
+    /// access cookie no longer carries the recovery claim. The enrollment stands
+    /// whatever happens here: on failure the next refresh drops the claim.
+    async fn drop_recovery_claim(
+        self: &Arc<Self>,
+        headers: &HeaderMap,
+        forwarded: &Forwarded,
+        reply: &mut Reply,
+    ) {
+        let access = &self.config.access_cookie_name;
+        let refresh = &self.config.refresh_cookie_name;
+        let fresh = reply.set.iter().find(|c| c.name == *refresh).map(|c| {
+            (
+                str_claim(&c.value, "refreshToken").to_string(),
+                str_claim(&c.value, "sub").to_string(),
+            )
+        });
+        let refreshed = match fresh {
+            // A silent refresh earlier in this request already rotated the token
+            // the browser holds, so the one it just issued is the one to spend.
+            Some((token, _)) if token.is_empty() => return,
+            Some((token, subject)) => {
+                self.refresh_session(format!("fresh:{token}"), &token, &subject, forwarded)
+                    .await
+            }
+            None => self.silent_refresh(headers, forwarded).await,
+        };
+        match refreshed {
+            Ok((_, cookies)) => {
+                reply
+                    .set
+                    .retain(|c| c.name != *access && c.name != *refresh);
+                reply.set.extend(cookies);
+            }
+            Err(SilentRefreshError::NoRefreshCookie) => {}
+            Err(SilentRefreshError::Failed(err)) => {
+                tracing::debug!("[seamless-auth] Refresh after recovery enrollment failed: {err}");
+            }
+        }
     }
 }
 

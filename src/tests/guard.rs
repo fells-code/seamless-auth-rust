@@ -225,6 +225,65 @@ async fn a_cookie_session_is_refused_for_cross_site_state_changes() {
     assert_eq!(r.status, 200);
 }
 
+#[tokio::test]
+async fn a_recovery_session_needs_enrollment_unless_allowed() {
+    let api = FakeApi::start().await;
+    let adapter = api.adapter(|b| b);
+    let recovery = sign_rs256(
+        json!({ "sub": "u1", "typ": "access", "iss": api.url, "aud": api.url, "recovery": true }),
+    );
+    let not_recovery = sign_rs256(
+        json!({ "sub": "u1", "typ": "access", "iss": api.url, "aud": api.url, "recovery": false }),
+    );
+    let cookie =
+        |token: &str| signed_cookie("seamless-access", json!({ "sub": "u1", "token": token }));
+    let allowing = Router::new().route(
+        "/api/enroll",
+        get(|user: User| async move { Json(json!({ "id": user.id, "recovery": user.recovery })) })
+            .route_layer(adapter.require_auth().allow_recovery(true)),
+    );
+
+    for (name, request) in [
+        ("cookie", call("GET", "/api/me").cookie(&cookie(&recovery))),
+        (
+            "bearer",
+            call("GET", "/api/me").header("authorization", &format!("Bearer {recovery}")),
+        ),
+    ] {
+        let r = request.through(guarded(&adapter)).await;
+        assert_eq!(r.status, 403, "{name}: {}", r.text);
+        assert_eq!(r.body, json!({ "error": "enrollment_required" }), "{name}");
+    }
+
+    let r = call("GET", "/api/me")
+        .cookie(&cookie(&not_recovery))
+        .through(guarded(&adapter))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text);
+
+    let r = call("GET", "/api/enroll")
+        .cookie(&cookie(&recovery))
+        .through(allowing.clone())
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text);
+    assert_eq!(r.body, json!({ "id": "u1", "recovery": true }));
+    let r = call("GET", "/api/enroll")
+        .header(
+            "authorization",
+            &format!("Bearer {}", api.token("u1", "access")),
+        )
+        .through(allowing)
+        .await;
+    assert_eq!(r.body["recovery"], false);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {recovery}")).unwrap(),
+    );
+    assert!(adapter.authenticate(&headers).await.unwrap().recovery);
+}
+
 #[test]
 fn debug_output_redacts_the_token() {
     let user = User {
@@ -233,6 +292,7 @@ fn debug_output_redacts_the_token() {
         email: None,
         phone: None,
         token: "live-access-token".into(),
+        recovery: false,
     };
     assert!(!format!("{user:?}").contains("live-access-token"));
 }

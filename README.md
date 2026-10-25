@@ -155,6 +155,25 @@ approves it, `POST /magic-link/verify/{token}/confirm` consumes it. The requesti
 first `GET /magic-link/check` after that issues the session; later checks answer
 `{ "message": "Success" }` with no tokens, and the adapter then leaves the cookies as they are.
 
+### Recovery sessions
+
+Signing in with a recovery code, or completing self-service recovery, issues a recovery session:
+its access token carries `recovery: true`, and the auth API lets it do little but enroll a new
+passkey or authenticator app. `require_auth()` answers such a session with 403
+`{"error":"enrollment_required"}`, so a half-recovered account is not taken for signed in. Let one
+through on the screens that guide the user to enroll, and tell it apart by `User::recovery`:
+
+```rust
+get(enroll_page).route_layer(auth.require_auth().allow_recovery(true))
+```
+
+`authenticate()` accepts a recovery session, so check `user.recovery` yourself when you use it.
+
+When a recovery session finishes passkey registration (`POST /webauthn/register/finish`) or TOTP
+enrollment (`POST /totp/enroll/verify`) in cookie transport, the adapter refreshes the session in
+the same response, so the access cookie drops the claim. A bearer client holds its own tokens and
+should call `POST /auth/refresh` after enrolling.
+
 ### The admin console
 
 `console_router()` serves the Seamless admin dashboard from your API, proxied from the auth API, so
