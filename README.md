@@ -95,16 +95,17 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `Adapter::builder(url)` | required | Where the adapter reaches the auth API |
 | `auth_server_issuer` | the URL | Expected `iss` of the API's tokens, when it differs from the URL you reach it at |
 | `audience` | the issuer | Expected `aud` of the API's tokens |
-| `cookie_secret` | required | Signs the session cookies (32 bytes or more) |
-| `service_secret` | required | The service token, read from `SEAMLESS_SERVICE_TOKEN` in the examples; the same value as the API's `API_SERVICE_TOKEN` (32 bytes or more) |
+| `cookie_secret` | required | Signs the session cookies (32 bytes or more, and not an example value) |
+| `service_secret` | required | The service token, read from `SEAMLESS_SERVICE_TOKEN` in the examples; the same value as the API's `API_SERVICE_TOKEN` (32 bytes or more, and not an example value) |
 | `jwks_kid` | `dev-main` | `kid` header on service tokens |
 | `cookie_domain` | none | Cookie `Domain` |
-| `insecure_cookies` | `false` | Drops `Secure`, for local development over HTTP |
+| `insecure_cookies` | `false` | Drops `Secure`, for local development over HTTP, and allows example secrets |
 | `same_site` | `None`, or `Lax` with `insecure_cookies` | Cookie `SameSite` |
 | `allowed_origins` | none | The only cross-origin callers allowed to change state while cookies are `SameSite=None` |
 | `session_cookie_names` | `seamless-access`, `seamless-refresh` | Session cookie names |
 | `flow_cookie_names` | `seamless-ephemeral` | Sign-in flow cookie names |
 | `deliver` | none | Sends OTP codes and magic links through your own transports |
+| `deliver_account_notices` | `false` | Your `deliver` also sends account notices (see Delivery) |
 | `trusted_proxies`, `resolve_client_ip` | the connecting peer | The end user's address. See below |
 | `disable_manifest_fetch` | `false` | Use only the manifest bundled with this version |
 | `http_client` | 15 second timeout, no redirects | Outbound `reqwest::Client` |
@@ -139,7 +140,34 @@ asks the API for the message and hands it to you:
 })
 ```
 
-A delivery error answers the request with 502 `delivery_failed`.
+A delivery error answers the request with 502 `delivery_failed`. A kind this version does not
+know is logged and skipped.
+
+An OTP code with `purpose` `account_recovery` (`d.is_account_recovery()`) was sent because someone
+is recovering the account: word it as a recovery code rather than a sign-in code, so an owner who
+did not ask for it knows something is happening.
+
+#### Account notices
+
+The auth API tells an account's owner when something happens to the account, such as a recovery
+being opened. Those notices are `account_notice_email` (`to`, `subject`, `text`, `notice`) and
+`account_notice_sms` (`to`, `text`, `notice`), and either may carry `cancel_url`. The API counts a
+notice it hands back as the owner being told, so the adapter asks for them only when you say your
+`deliver` sends both kinds:
+
+```rust
+.deliver(deliver)
+.deliver_account_notices(true)
+```
+
+Then, on the routes the manifest marks `notices` (today `POST /recovery/verify`), the adapter sends
+`x-seamless-auth-delivery-kinds: account_notice_email,account_notice_sms`, hands each notice in the
+response to `deliver`, and strips them from what the client sees. Every notice is tried, and one
+that reaches the owner is enough. If none does, the API has already opened the recovery, so the
+adapter cancels it with the token from the notice's cancel link and answers 503
+`recovery_notice_failed`. Without the option the API sends
+notices itself. `cancel_url` (and `text`, which can hold it) is a credential: send it only to `to`
+and never log it.
 
 ### Magic links
 
@@ -154,6 +182,25 @@ Opened anywhere else, the link answers 409 `confirmation_required`, with `reques
 approves it, `POST /magic-link/verify/{token}/confirm` consumes it. The requesting attempt's
 first `GET /magic-link/check` after that issues the session; later checks answer
 `{ "message": "Success" }` with no tokens, and the adapter then leaves the cookies as they are.
+
+### Recovery sessions
+
+Signing in with a recovery code, or completing self-service recovery, issues a recovery session:
+its access token carries `recovery: true`, and the auth API lets it do little but enroll a new
+passkey or authenticator app. `require_auth()` answers such a session with 403
+`{"error":"enrollment_required"}`, so a half-recovered account is not taken for signed in. Let one
+through on the screens that guide the user to enroll, and tell it apart by `User::recovery`:
+
+```rust
+get(enroll_page).route_layer(auth.require_auth().allow_recovery(true))
+```
+
+`authenticate()` accepts a recovery session, so check `user.recovery` yourself when you use it.
+
+When a recovery session finishes passkey registration (`POST /webauthn/register/finish`) or TOTP
+enrollment (`POST /totp/enroll/verify`) in cookie transport, the adapter refreshes the session in
+the same response, so the access cookie drops the claim. A bearer client holds its own tokens and
+should call `POST /auth/refresh` after enrolling.
 
 ### The admin console
 

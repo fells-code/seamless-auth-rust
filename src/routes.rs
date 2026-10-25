@@ -4,7 +4,7 @@ use axum::body::Body;
 use axum::http::{
     HeaderMap, HeaderValue, Method, StatusCode, header::CONTENT_TYPE, request::Parts,
 };
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::adapter::{
     BodyError, Forwarded, Inner, Reply, UpstreamCall, bearer_token, failure, is_json_content_type,
@@ -13,8 +13,9 @@ use crate::adapter::{
 use crate::cookies::{
     CookieWrite, cookie_kind, ephemeral_cookie, raw_cookie, read_cookie, session_cookies,
 };
-use crate::delivery::parse_delivery;
-use crate::jwt::{Claims, str_claim};
+use crate::delivery::{KNOWN_KINDS, parse_delivery};
+use crate::guard::is_recovery;
+use crate::jwt::{Claims, str_claim, unverified_claims};
 use crate::manifest::RouteMatch;
 use crate::refresh::SilentRefreshError;
 
@@ -22,6 +23,15 @@ use crate::refresh::SilentRefreshError;
 // recognises by that flow's pre-auth token. The token is optional: without it
 // the API asks for confirmation instead, so its absence is never a 401 here.
 const MAGIC_LINK_VERIFY: (&str, &str) = ("GET", "/magic-link/verify/{token}");
+
+const NOTICE_KINDS: &str = "account_notice_email,account_notice_sms";
+
+// Enrolling a factor lifts a recovery session's restriction at the auth API, but
+// the access token keeps its recovery claim until it is refreshed.
+const ENROLLMENT_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/webauthn/register/finish"),
+    ("POST", "/totp/enroll/verify"),
+];
 
 /// What the adapter sends for a route, and any cookies a silent refresh
 /// produced on the way.
@@ -194,17 +204,29 @@ impl Inner {
                 Err(rejected) => return *rejected,
             }
         };
+        let after_recovery_enrollment = !bearer
+            && ENROLLMENT_ROUTES.contains(&(route.method.as_str(), route.path.as_str()))
+            && credential
+                .authorization
+                .as_deref()
+                .and_then(|a| a.strip_prefix("Bearer "))
+                .and_then(unverified_claims)
+                .is_some_and(|claims| is_recovery(&claims));
         let set = credential.set;
 
         let Ok(method) = Method::from_bytes(route.method.as_bytes()) else {
             return Reply::error(StatusCode::NOT_FOUND, "not_found");
         };
-        let external = route.delivery && self.config.deliver.is_some();
+        // Notices are asked for only when the application delivers both kinds:
+        // the auth API takes a notice it hands back as the owner being told.
+        let notices = route.notices && self.config.deliver_account_notices;
+        let external = (route.delivery && self.config.deliver.is_some()) || notices;
         let mut call = UpstreamCall::new(method, route.upstream_path(&found.params));
         call.query = parts.uri.query().map(str::to_string);
         call.body = body;
         call.authorization = credential.authorization;
         call.external_delivery = external;
+        call.delivery_kinds = notices.then_some(NOTICE_KINDS);
         call.service = if external {
             self.tokens.delivery_authorization()
         } else {
@@ -240,21 +262,44 @@ impl Inner {
             // The message is the application's to send. It never goes back to the
             // caller, in either transport.
             let delivery = obj.remove("delivery").filter(|d| !d.is_null());
-            if let (Some(raw), Some(deliver), true) =
-                (delivery, self.config.deliver.as_ref(), external)
+            if let (Some(raw), true) = (delivery, external)
+                && let Err(err) = self.deliver(&raw).await
             {
-                let sent = match parse_delivery(&raw) {
-                    Ok(delivery) => deliver(delivery).await.map_err(|e| e.to_string()),
-                    Err(err) => Err(err),
-                };
-                if let Err(err) = sent {
-                    tracing::warn!(
-                        "[seamless-auth] Delivery for {} {} failed: {err}",
+                tracing::warn!(
+                    "[seamless-auth] Delivery for {} {} failed: {err}",
+                    route.method,
+                    route.path
+                );
+                return Reply::error(StatusCode::BAD_GATEWAY, "delivery_failed").with_set(set);
+            }
+        }
+        if route.notices
+            && let Some(Value::Object(obj)) = data.as_mut()
+        {
+            let deliveries = match obj.remove("deliveries") {
+                Some(Value::Array(items)) if notices => items,
+                _ => Vec::new(),
+            };
+            // Every notice is attempted: one transport failing is no reason to
+            // keep the owner from hearing on the other.
+            let mut delivered = 0;
+            for raw in &deliveries {
+                match self.deliver(raw).await {
+                    Ok(true) => delivered += 1,
+                    Ok(false) => {}
+                    Err(err) => tracing::warn!(
+                        "[seamless-auth] Notice delivery for {} {} failed: {err}",
                         route.method,
                         route.path
-                    );
-                    return Reply::error(StatusCode::BAD_GATEWAY, "delivery_failed").with_set(set);
+                    ),
                 }
+            }
+            // The auth API opened the request when it handed the notices back, so
+            // an owner who heard nothing must not be left with it running.
+            if !deliveries.is_empty() && delivered == 0 {
+                self.cancel_unnoticed_recovery(forwarded, &deliveries).await;
+                return Reply::error(StatusCode::SERVICE_UNAVAILABLE, "recovery_notice_failed")
+                    .with_set(set);
             }
         }
 
@@ -307,7 +352,104 @@ impl Inner {
             )),
             data => data,
         };
+        if after_recovery_enrollment {
+            self.drop_recovery_claim(&parts.headers, forwarded, &mut reply)
+                .await;
+        }
         reply
+    }
+
+    /// Hands one message to the application, reporting whether it was. A kind
+    /// this version does not know is skipped, never passed on half understood.
+    async fn deliver(&self, raw: &Value) -> Result<bool, String> {
+        let Some(deliver) = self.config.deliver.as_ref() else {
+            return Ok(false);
+        };
+        let delivery = parse_delivery(raw)?;
+        if !KNOWN_KINDS.contains(&delivery.kind.as_str()) {
+            tracing::warn!(
+                "[seamless-auth] Skipping a delivery of unknown kind {:?}",
+                delivery.kind
+            );
+            return Ok(false);
+        }
+        deliver(delivery)
+            .await
+            .map(|_| true)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Cancels a recovery request whose owner no notice reached, with the token
+    /// in the fragment of a notice's cancel link. Neither is ever logged.
+    async fn cancel_unnoticed_recovery(&self, forwarded: &Forwarded, deliveries: &[Value]) {
+        let token = deliveries.iter().find_map(|raw| {
+            raw.get("cancelUrl")
+                .and_then(Value::as_str)
+                .and_then(|url| url.split_once('#'))
+                .map(|(_, token)| token)
+                .filter(|token| !token.is_empty())
+        });
+        let Some(token) = token else {
+            tracing::warn!(
+                "[seamless-auth] No notice was delivered and none carried a cancel link"
+            );
+            return;
+        };
+        let mut call = UpstreamCall::new(Method::POST, "/recovery/cancel");
+        call.body = Some(json!({ "cancelToken": token }).to_string().into());
+        call.service = self.tokens.proxy_authorization();
+        match self.call(forwarded, call).await {
+            Ok(res) if res.status().is_success() => {}
+            Ok(res) => tracing::warn!(
+                "[seamless-auth] Cancelling an unnoticed recovery answered {}",
+                res.status().as_u16()
+            ),
+            Err(err) => tracing::warn!(
+                "[seamless-auth] Cancelling an unnoticed recovery failed: {}",
+                err.without_url()
+            ),
+        }
+    }
+
+    /// Refreshes the session after a recovery session enrolled a factor, so the
+    /// access cookie no longer carries the recovery claim. The enrollment stands
+    /// whatever happens here: on failure the next refresh drops the claim.
+    async fn drop_recovery_claim(
+        self: &Arc<Self>,
+        headers: &HeaderMap,
+        forwarded: &Forwarded,
+        reply: &mut Reply,
+    ) {
+        let access = &self.config.access_cookie_name;
+        let refresh = &self.config.refresh_cookie_name;
+        let fresh = reply.set.iter().find(|c| c.name == *refresh).map(|c| {
+            (
+                str_claim(&c.value, "refreshToken").to_string(),
+                str_claim(&c.value, "sub").to_string(),
+            )
+        });
+        let refreshed = match fresh {
+            // A silent refresh earlier in this request already rotated the token
+            // the browser holds, so the one it just issued is the one to spend.
+            Some((token, _)) if token.is_empty() => return,
+            Some((token, subject)) => {
+                self.refresh_session(format!("fresh:{token}"), &token, &subject, forwarded)
+                    .await
+            }
+            None => self.silent_refresh(headers, forwarded).await,
+        };
+        match refreshed {
+            Ok((_, cookies)) => {
+                reply
+                    .set
+                    .retain(|c| c.name != *access && c.name != *refresh);
+                reply.set.extend(cookies);
+            }
+            Err(SilentRefreshError::NoRefreshCookie) => {}
+            Err(SilentRefreshError::Failed(err)) => {
+                tracing::debug!("[seamless-auth] Refresh after recovery enrollment failed: {err}");
+            }
+        }
     }
 }
 

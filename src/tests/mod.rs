@@ -6,6 +6,8 @@ mod console;
 mod guard;
 mod magic_link;
 mod manifest;
+mod notices;
+mod recovery;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

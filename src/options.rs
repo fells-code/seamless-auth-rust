@@ -12,6 +12,18 @@ use crate::delivery::{Delivery, DeliveryError, DeliveryFuture};
 
 const MIN_SECRET_LENGTH: usize = 32;
 
+// Example values from the starters and the portal, long enough to pass the
+// length check, so a deployment that never replaced them would otherwise boot.
+const PLACEHOLDER_SECRETS: &[&str] = &[
+    "dev-only-cookie-signing-key-replace-me",
+    "GRAB_FROM_SEAMLESS_AUTH_PORTAL_DEV",
+];
+
+fn is_placeholder(secret: &str) -> bool {
+    let secret = secret.trim();
+    PLACEHOLDER_SECRETS.contains(&secret) || secret.to_ascii_lowercase().contains("replace-me")
+}
+
 /// The `SameSite` attribute of the adapter's cookies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SameSite {
@@ -44,6 +56,12 @@ pub enum BuildError {
     WeakCookieSecret,
     /// The service secret is shorter than 32 bytes.
     WeakServiceSecret,
+    /// The cookie secret is a known example value. Allowed only with
+    /// [`Builder::insecure_cookies`].
+    PlaceholderCookieSecret,
+    /// The service secret is a known example value. Allowed only with
+    /// [`Builder::insecure_cookies`].
+    PlaceholderServiceSecret,
     /// A cookie name or domain holds characters a `Set-Cookie` header cannot carry.
     InvalidCookieAttribute(String),
     /// The HTTP client could not be built.
@@ -63,6 +81,12 @@ impl fmt::Display for BuildError {
             BuildError::WeakServiceSecret => write!(
                 f,
                 "seamless-auth: the service secret must be at least {MIN_SECRET_LENGTH} bytes"
+            ),
+            BuildError::PlaceholderCookieSecret => f.write_str(
+                "seamless-auth: the cookie secret is an example value; replace it with a random secret",
+            ),
+            BuildError::PlaceholderServiceSecret => f.write_str(
+                "seamless-auth: the service secret is an example value; replace it with the API's API_SERVICE_TOKEN",
             ),
             BuildError::InvalidCookieAttribute(what) => {
                 write!(f, "seamless-auth: invalid cookie attribute {what}")
@@ -93,6 +117,7 @@ pub struct Builder {
     refresh_cookie_name: String,
     pre_auth_cookie_name: String,
     deliver: Option<DeliverFn>,
+    deliver_account_notices: bool,
     client_ip: Option<ClientIpFn>,
     disable_manifest_fetch: bool,
     http_client: Option<reqwest::Client>,
@@ -127,6 +152,7 @@ impl Builder {
             // never hold an ephemeral cookie at the same time.
             pre_auth_cookie_name: "seamless-ephemeral".into(),
             deliver: None,
+            deliver_account_notices: false,
             client_ip: None,
             disable_manifest_fetch: false,
             http_client: None,
@@ -174,7 +200,8 @@ impl Builder {
         self
     }
 
-    /// Drops the `Secure` attribute, for local development over plain HTTP.
+    /// Drops the `Secure` attribute, for local development over plain HTTP. It
+    /// also lets the cookie and service secrets hold a known example value.
     pub fn insecure_cookies(mut self, insecure: bool) -> Self {
         self.insecure_cookies = insecure;
         self
@@ -237,6 +264,17 @@ impl Builder {
         self
     }
 
+    /// Declares that the [`deliver`](Self::deliver) callback sends the auth API's
+    /// account notices (`account_notice_email` and `account_notice_sms`), such as
+    /// the one that tells an owner someone opened a recovery of their account.
+    /// The auth API counts a notice it hands back as the owner being told, so it
+    /// hands them back only to an adapter that says it delivers both kinds.
+    /// Without this, the auth API sends those notices itself.
+    pub fn deliver_account_notices(mut self, deliver: bool) -> Self {
+        self.deliver_account_notices = deliver;
+        self
+    }
+
     /// Resolves the end user's address from the request headers and the
     /// connecting peer. Defaults to the peer. Behind a proxy, use
     /// [`trusted_proxies`](Self::trusted_proxies).
@@ -285,6 +323,28 @@ impl Builder {
         }
         if self.service_secret.len() < MIN_SECRET_LENGTH {
             return Err(BuildError::WeakServiceSecret);
+        }
+        for (secret, refused, what) in [
+            (
+                &self.cookie_secret,
+                BuildError::PlaceholderCookieSecret,
+                "cookie secret",
+            ),
+            (
+                &self.service_secret,
+                BuildError::PlaceholderServiceSecret,
+                "service secret",
+            ),
+        ] {
+            if !is_placeholder(secret) {
+                continue;
+            }
+            if !self.insecure_cookies {
+                return Err(refused);
+            }
+            tracing::warn!(
+                "[seamless-auth] The {what} is an example value. It is allowed only because insecure_cookies is on."
+            );
         }
 
         for name in [
@@ -348,6 +408,7 @@ impl Builder {
             registration_cookie_name: self.registration_cookie_name,
             refresh_cookie_name: self.refresh_cookie_name,
             pre_auth_cookie_name: self.pre_auth_cookie_name,
+            deliver_account_notices: self.deliver_account_notices && self.deliver.is_some(),
             deliver: self.deliver,
             client_ip: self.client_ip,
             fetch_manifest: !self.disable_manifest_fetch,
@@ -377,6 +438,7 @@ pub(crate) struct Config {
     pub refresh_cookie_name: String,
     pub pre_auth_cookie_name: String,
     pub deliver: Option<DeliverFn>,
+    pub deliver_account_notices: bool,
     pub client_ip: Option<ClientIpFn>,
     pub fetch_manifest: bool,
     pub http_client: reqwest::Client,

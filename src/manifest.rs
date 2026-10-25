@@ -48,6 +48,10 @@ pub struct ManifestRoute {
     /// Whether the route sends an OTP code or magic link.
     #[serde(default)]
     pub delivery: bool,
+    /// Whether the route tells the account owner something happened, through
+    /// notices an adapter that owns delivery sends from `deliveries`.
+    #[serde(default)]
+    pub notices: bool,
 }
 
 /// The fields of a response body a browser may see.

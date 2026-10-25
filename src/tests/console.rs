@@ -67,6 +67,45 @@ async fn the_console_is_proxied_from_the_auth_api() {
 }
 
 #[tokio::test]
+async fn the_console_keeps_the_api_framing_and_sniffing_headers() {
+    let api = FakeApi::start().await;
+    api.on(
+        "GET",
+        "/console",
+        Arc::new(|_| {
+            let mut res = Response::new(Body::from("<html>"));
+            let headers = res.headers_mut();
+            headers.insert("content-type", HeaderValue::from_static("text/html"));
+            headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+            headers.insert(
+                "content-security-policy",
+                HeaderValue::from_static("frame-ancestors 'none'"),
+            );
+            headers.insert(
+                "x-content-type-options",
+                HeaderValue::from_static("nosniff"),
+            );
+            headers.insert("x-powered-by", HeaderValue::from_static("Express"));
+            res
+        }),
+    );
+    let adapter = api.adapter(|b| b);
+
+    let r = call("GET", "/console/")
+        .through(console_app(&adapter))
+        .await;
+
+    assert_eq!(r.status, 200);
+    assert_eq!(r.headers["x-frame-options"], "DENY");
+    assert_eq!(
+        r.headers["content-security-policy"],
+        "frame-ancestors 'none'"
+    );
+    assert_eq!(r.headers["x-content-type-options"], "nosniff");
+    assert!(r.headers.get("x-powered-by").is_none());
+}
+
+#[tokio::test]
 async fn the_console_root_and_head() {
     let api = FakeApi::start().await;
     api.on("GET", "/console", html("<html>"));

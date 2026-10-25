@@ -160,7 +160,19 @@ impl Inner {
             return Err(SilentRefreshError::Failed("invalid refresh cookie".into()));
         }
         let subject = payload.as_ref().map(|p| str_claim(p, "sub")).unwrap_or("");
+        self.refresh_session(format!("cookie:{raw}"), refresh_token, subject, forwarded)
+            .await
+    }
 
+    /// Rotates a refresh token, shared under `key`, and returns the verified
+    /// session with its cookies.
+    pub(crate) async fn refresh_session(
+        self: &Arc<Self>,
+        key: String,
+        refresh_token: &str,
+        subject: &str,
+        forwarded: &Forwarded,
+    ) -> Result<(Claims, Vec<CookieWrite>), SilentRefreshError> {
         let mut extra = Claims::new();
         extra.insert("refreshToken".into(), Value::from(refresh_token));
         let Some(service) = self.tokens.sign(subject, extra) else {
@@ -174,7 +186,7 @@ impl Inner {
         let forwarded = forwarded.clone();
         let outcome = self
             .refreshes
-            .share(format!("cookie:{raw}"), move || async move {
+            .share(key, move || async move {
                 inner.rotate(&forwarded, &refresh_token, service).await
             })
             .await;

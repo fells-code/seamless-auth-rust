@@ -3,7 +3,10 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, ETAG, LAST_MODIFIED};
+use axum::http::header::{
+    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, LAST_MODIFIED,
+    X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
+};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::Response;
 use axum::routing::any;
@@ -163,7 +166,17 @@ impl Inner {
         };
 
         let mut headers = HeaderMap::new();
-        for name in [CONTENT_TYPE, CACHE_CONTROL, ETAG, LAST_MODIFIED] {
+        // The framing and sniffing headers keep the console, now on the app's
+        // origin, from being framed by another site.
+        for name in [
+            CONTENT_TYPE,
+            CACHE_CONTROL,
+            ETAG,
+            LAST_MODIFIED,
+            X_FRAME_OPTIONS,
+            CONTENT_SECURITY_POLICY,
+            X_CONTENT_TYPE_OPTIONS,
+        ] {
             if let Some(value) = res.headers().get(&name) {
                 headers.insert(name, value.clone());
             }
