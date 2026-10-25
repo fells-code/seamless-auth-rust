@@ -24,6 +24,7 @@ use crate::service_token::ServiceTokens;
 
 const TRANSPORT_HEADER: &str = "x-seamless-auth-transport";
 pub(crate) const DELIVERY_MODE_HEADER: &str = "x-seamless-auth-delivery-mode";
+pub(crate) const DELIVERY_KINDS_HEADER: &str = "x-seamless-auth-delivery-kinds";
 pub(crate) const MAX_BODY_BYTES: usize = 1 << 20;
 
 /// Serves the Seamless Auth routes and guards the application's own.
@@ -146,6 +147,7 @@ pub(crate) struct UpstreamCall {
     pub authorization: Option<String>,
     pub service: Option<String>,
     pub external_delivery: bool,
+    pub delivery_kinds: Option<&'static str>,
 }
 
 impl UpstreamCall {
@@ -158,6 +160,7 @@ impl UpstreamCall {
             authorization: None,
             service: None,
             external_delivery: false,
+            delivery_kinds: None,
         }
     }
 }
@@ -325,6 +328,9 @@ impl Inner {
         }
         if call.external_delivery {
             req = req.header(DELIVERY_MODE_HEADER, "external");
+            if let Some(kinds) = call.delivery_kinds {
+                req = req.header(DELIVERY_KINDS_HEADER, kinds);
+            }
         }
         req.send().await
     }

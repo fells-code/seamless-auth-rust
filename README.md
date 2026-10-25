@@ -105,6 +105,7 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `session_cookie_names` | `seamless-access`, `seamless-refresh` | Session cookie names |
 | `flow_cookie_names` | `seamless-ephemeral` | Sign-in flow cookie names |
 | `deliver` | none | Sends OTP codes and magic links through your own transports |
+| `deliver_account_notices` | `false` | Your `deliver` also sends account notices (see Delivery) |
 | `trusted_proxies`, `resolve_client_ip` | the connecting peer | The end user's address. See below |
 | `disable_manifest_fetch` | `false` | Use only the manifest bundled with this version |
 | `http_client` | 15 second timeout, no redirects | Outbound `reqwest::Client` |
@@ -139,7 +140,32 @@ asks the API for the message and hands it to you:
 })
 ```
 
-A delivery error answers the request with 502 `delivery_failed`.
+A delivery error answers the request with 502 `delivery_failed`. A kind this version does not
+know is logged and skipped.
+
+An OTP code with `purpose` `account_recovery` (`d.is_account_recovery()`) was sent because someone
+is recovering the account: word it as a recovery code rather than a sign-in code, so an owner who
+did not ask for it knows something is happening.
+
+#### Account notices
+
+The auth API tells an account's owner when something happens to the account, such as a recovery
+being opened. Those notices are `account_notice_email` (`to`, `subject`, `text`, `notice`) and
+`account_notice_sms` (`to`, `text`, `notice`), and either may carry `cancel_url`. The API counts a
+notice it hands back as the owner being told, so the adapter asks for them only when you say your
+`deliver` sends both kinds:
+
+```rust
+.deliver(deliver)
+.deliver_account_notices(true)
+```
+
+Then, on the routes the manifest marks `notices` (today `POST /recovery/verify`), the adapter sends
+`x-seamless-auth-delivery-kinds: account_notice_email,account_notice_sms`, hands each notice in the
+response to `deliver`, and strips them from what the client sees. If any notice fails, the request
+answers 502 `delivery_failed` after every notice has been tried. Without the option the API sends
+notices itself. `cancel_url` (and `text`, which can hold it) is a credential: send it only to `to`
+and never log it.
 
 ### Magic links
 

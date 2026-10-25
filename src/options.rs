@@ -117,6 +117,7 @@ pub struct Builder {
     refresh_cookie_name: String,
     pre_auth_cookie_name: String,
     deliver: Option<DeliverFn>,
+    deliver_account_notices: bool,
     client_ip: Option<ClientIpFn>,
     disable_manifest_fetch: bool,
     http_client: Option<reqwest::Client>,
@@ -151,6 +152,7 @@ impl Builder {
             // never hold an ephemeral cookie at the same time.
             pre_auth_cookie_name: "seamless-ephemeral".into(),
             deliver: None,
+            deliver_account_notices: false,
             client_ip: None,
             disable_manifest_fetch: false,
             http_client: None,
@@ -259,6 +261,17 @@ impl Builder {
             let fut = deliver(delivery);
             Box::pin(async move { fut.await.map_err(Into::into) })
         }));
+        self
+    }
+
+    /// Declares that the [`deliver`](Self::deliver) callback sends the auth API's
+    /// account notices (`account_notice_email` and `account_notice_sms`), such as
+    /// the one that tells an owner someone opened a recovery of their account.
+    /// The auth API counts a notice it hands back as the owner being told, so it
+    /// hands them back only to an adapter that says it delivers both kinds.
+    /// Without this, the auth API sends those notices itself.
+    pub fn deliver_account_notices(mut self, deliver: bool) -> Self {
+        self.deliver_account_notices = deliver;
         self
     }
 
@@ -395,6 +408,7 @@ impl Builder {
             registration_cookie_name: self.registration_cookie_name,
             refresh_cookie_name: self.refresh_cookie_name,
             pre_auth_cookie_name: self.pre_auth_cookie_name,
+            deliver_account_notices: self.deliver_account_notices && self.deliver.is_some(),
             deliver: self.deliver,
             client_ip: self.client_ip,
             fetch_manifest: !self.disable_manifest_fetch,
@@ -424,6 +438,7 @@ pub(crate) struct Config {
     pub refresh_cookie_name: String,
     pub pre_auth_cookie_name: String,
     pub deliver: Option<DeliverFn>,
+    pub deliver_account_notices: bool,
     pub client_ip: Option<ClientIpFn>,
     pub fetch_manifest: bool,
     pub http_client: reqwest::Client,
