@@ -95,11 +95,11 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `Adapter::builder(url)` | required | Where the adapter reaches the auth API |
 | `auth_server_issuer` | the URL | Expected `iss` of the API's tokens, when it differs from the URL you reach it at |
 | `audience` | the issuer | Expected `aud` of the API's tokens |
-| `cookie_secret` | required | Signs the session cookies (32 bytes or more) |
-| `service_secret` | required | The service token, read from `SEAMLESS_SERVICE_TOKEN` in the examples; the same value as the API's `API_SERVICE_TOKEN` (32 bytes or more) |
+| `cookie_secret` | required | Signs the session cookies (32 bytes or more, and not an example value) |
+| `service_secret` | required | The service token, read from `SEAMLESS_SERVICE_TOKEN` in the examples; the same value as the API's `API_SERVICE_TOKEN` (32 bytes or more, and not an example value) |
 | `jwks_kid` | `dev-main` | `kid` header on service tokens |
 | `cookie_domain` | none | Cookie `Domain` |
-| `insecure_cookies` | `false` | Drops `Secure`, for local development over HTTP |
+| `insecure_cookies` | `false` | Drops `Secure`, for local development over HTTP, and allows example secrets |
 | `same_site` | `None`, or `Lax` with `insecure_cookies` | Cookie `SameSite` |
 | `allowed_origins` | none | The only cross-origin callers allowed to change state while cookies are `SameSite=None` |
 | `session_cookie_names` | `seamless-access`, `seamless-refresh` | Session cookie names |

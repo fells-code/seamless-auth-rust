@@ -12,6 +12,18 @@ use crate::delivery::{Delivery, DeliveryError, DeliveryFuture};
 
 const MIN_SECRET_LENGTH: usize = 32;
 
+// Example values from the starters and the portal, long enough to pass the
+// length check, so a deployment that never replaced them would otherwise boot.
+const PLACEHOLDER_SECRETS: &[&str] = &[
+    "dev-only-cookie-signing-key-replace-me",
+    "GRAB_FROM_SEAMLESS_AUTH_PORTAL_DEV",
+];
+
+fn is_placeholder(secret: &str) -> bool {
+    let secret = secret.trim();
+    PLACEHOLDER_SECRETS.contains(&secret) || secret.to_ascii_lowercase().contains("replace-me")
+}
+
 /// The `SameSite` attribute of the adapter's cookies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SameSite {
@@ -44,6 +56,12 @@ pub enum BuildError {
     WeakCookieSecret,
     /// The service secret is shorter than 32 bytes.
     WeakServiceSecret,
+    /// The cookie secret is a known example value. Allowed only with
+    /// [`Builder::insecure_cookies`].
+    PlaceholderCookieSecret,
+    /// The service secret is a known example value. Allowed only with
+    /// [`Builder::insecure_cookies`].
+    PlaceholderServiceSecret,
     /// A cookie name or domain holds characters a `Set-Cookie` header cannot carry.
     InvalidCookieAttribute(String),
     /// The HTTP client could not be built.
@@ -63,6 +81,12 @@ impl fmt::Display for BuildError {
             BuildError::WeakServiceSecret => write!(
                 f,
                 "seamless-auth: the service secret must be at least {MIN_SECRET_LENGTH} bytes"
+            ),
+            BuildError::PlaceholderCookieSecret => f.write_str(
+                "seamless-auth: the cookie secret is an example value; replace it with a random secret",
+            ),
+            BuildError::PlaceholderServiceSecret => f.write_str(
+                "seamless-auth: the service secret is an example value; replace it with the API's API_SERVICE_TOKEN",
             ),
             BuildError::InvalidCookieAttribute(what) => {
                 write!(f, "seamless-auth: invalid cookie attribute {what}")
@@ -174,7 +198,8 @@ impl Builder {
         self
     }
 
-    /// Drops the `Secure` attribute, for local development over plain HTTP.
+    /// Drops the `Secure` attribute, for local development over plain HTTP. It
+    /// also lets the cookie and service secrets hold a known example value.
     pub fn insecure_cookies(mut self, insecure: bool) -> Self {
         self.insecure_cookies = insecure;
         self
@@ -285,6 +310,28 @@ impl Builder {
         }
         if self.service_secret.len() < MIN_SECRET_LENGTH {
             return Err(BuildError::WeakServiceSecret);
+        }
+        for (secret, refused, what) in [
+            (
+                &self.cookie_secret,
+                BuildError::PlaceholderCookieSecret,
+                "cookie secret",
+            ),
+            (
+                &self.service_secret,
+                BuildError::PlaceholderServiceSecret,
+                "service secret",
+            ),
+        ] {
+            if !is_placeholder(secret) {
+                continue;
+            }
+            if !self.insecure_cookies {
+                return Err(refused);
+            }
+            tracing::warn!(
+                "[seamless-auth] The {what} is an example value. It is allowed only because insecure_cookies is on."
+            );
         }
 
         for name in [

@@ -913,6 +913,39 @@ fn build_refuses_weak_or_missing_configuration() {
 }
 
 #[test]
+fn build_refuses_placeholder_secrets_outside_insecure_mode() {
+    let build = |cookie: &str, service: &str, insecure: bool| {
+        Adapter::builder("https://a")
+            .cookie_secret(cookie)
+            .service_secret(service)
+            .jwks_kid("k")
+            .insecure_cookies(insecure)
+            .build()
+    };
+    for placeholder in [
+        "dev-only-cookie-signing-key-replace-me",
+        "GRAB_FROM_SEAMLESS_AUTH_PORTAL_DEV",
+        "my-own-cookie-secret-REPLACE-ME-before-prod",
+    ] {
+        assert_eq!(
+            build(placeholder, TEST_SERVICE, false).unwrap_err(),
+            crate::BuildError::PlaceholderCookieSecret,
+            "{placeholder}"
+        );
+        assert_eq!(
+            build(TEST_SECRET, placeholder, false).unwrap_err(),
+            crate::BuildError::PlaceholderServiceSecret,
+            "{placeholder}"
+        );
+        assert!(
+            build(placeholder, placeholder, true).is_ok(),
+            "{placeholder}"
+        );
+    }
+    assert!(build(TEST_SECRET, TEST_SERVICE, false).is_ok());
+}
+
+#[test]
 fn json_content_types() {
     for (content_type, want) in [
         (None, true),
