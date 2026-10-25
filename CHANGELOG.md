@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/fells-code/seamless-auth-rust/compare/v0.2.1...v0.3.0) - 2026-10-25
+
+### Added
+
+- deliver account recovery notices and pass through the v0.20 recovery routes
+- refuse recovery sessions in require_auth and refresh them after enrollment
+
+### Documentation
+
+- link the governance document and license pledge
+
+### Fixed
+
+- cancel a recovery request when no owner notice was delivered
+- refuse known placeholder secrets at startup
+- *(console)* keep the API's framing and content-type headers on the console proxy
+
 ## [0.2.1](https://github.com/fells-code/seamless-auth-rust/compare/v0.2.0...v0.2.1) - 2026-10-18
 
 ### Documentation
