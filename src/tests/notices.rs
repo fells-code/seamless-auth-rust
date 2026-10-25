@@ -167,25 +167,37 @@ async fn delivery_routes_do_not_ask_for_notices() {
     assert!(sent[0].is_account_recovery());
 }
 
-#[tokio::test]
-async fn a_failed_notice_still_tries_the_rest_and_is_reported() {
-    let api = FakeApi::start().await;
-    api.on("POST", "/recovery/verify", respond(200, opened()));
-    let tried = Arc::new(Mutex::new(Vec::new()));
+fn failing_on(
+    kinds: &'static [&'static str],
+    tried: &Arc<Mutex<Vec<String>>>,
+) -> impl FnOnce(Builder) -> Builder {
     let sink = tried.clone();
-    let adapter = api.adapter(|b| {
+    move |b| {
         b.deliver(move |d: Delivery| {
             sink.lock().unwrap().push(d.kind.clone());
             async move {
-                if d.kind == "account_notice_email" {
-                    Err("smtp down")
+                if kinds.contains(&d.kind.as_str()) {
+                    Err("transport down")
                 } else {
                     Ok(())
                 }
             }
         })
         .deliver_account_notices(true)
-    });
+    }
+}
+
+#[tokio::test]
+async fn one_notice_delivered_is_enough() {
+    let api = FakeApi::start().await;
+    api.on("POST", "/recovery/verify", respond(200, opened()));
+    api.on(
+        "POST",
+        "/recovery/cancel",
+        respond(200, json!({ "message": "ok" })),
+    );
+    let tried = Arc::new(Mutex::new(Vec::new()));
+    let adapter = api.adapter(failing_on(&["account_notice_email"], &tried));
 
     let r = call("POST", "/recovery/verify")
         .body(r#"{"code":"123456"}"#)
@@ -193,11 +205,49 @@ async fn a_failed_notice_still_tries_the_rest_and_is_reported() {
         .to(&adapter)
         .await;
 
-    assert_eq!(r.status, 502, "{}", r.text);
-    assert_eq!(r.body, json!({ "error": "delivery_failed" }));
+    assert_eq!(r.status, 200, "{}", r.text);
+    assert_eq!(r.body["state"], "pending");
+    assert!(r.body.get("deliveries").is_none(), "{}", r.body);
     assert_eq!(
         *tried.lock().unwrap(),
         ["account_notice_email", "account_notice_sms"]
+    );
+    assert!(api.calls_to("POST", "/recovery/cancel").is_empty());
+}
+
+#[tokio::test]
+async fn no_notice_delivered_cancels_the_request() {
+    let api = FakeApi::start().await;
+    api.on("POST", "/recovery/verify", respond(200, opened()));
+    api.on(
+        "POST",
+        "/recovery/cancel",
+        respond(200, json!({ "message": "ok" })),
+    );
+    let tried = Arc::new(Mutex::new(Vec::new()));
+    let adapter = api.adapter(failing_on(
+        &["account_notice_email", "account_notice_sms"],
+        &tried,
+    ));
+
+    let r = call("POST", "/recovery/verify")
+        .body(r#"{"code":"123456"}"#)
+        .cookie(&pre_auth())
+        .to(&adapter)
+        .await;
+
+    assert_eq!(r.status, 503, "{}", r.text);
+    assert_eq!(r.body, json!({ "error": "recovery_notice_failed" }));
+    assert_eq!(tried.lock().unwrap().len(), 2);
+    let cancels = api.calls_to("POST", "/recovery/cancel");
+    assert_eq!(cancels.len(), 1);
+    let body: Value = serde_json::from_str(&cancels[0].body).unwrap();
+    assert_eq!(body, json!({ "cancelToken": "tok" }));
+    assert_eq!(cancels[0].header("authorization"), "");
+    assert_eq!(cancels[0].header("x-seamless-auth-delivery-mode"), "");
+    assert_eq!(
+        str_claim(&service_claims(&cancels[0]), "sub"),
+        PROXY_SUBJECT
     );
 }
 

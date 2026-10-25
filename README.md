@@ -162,8 +162,10 @@ notice it hands back as the owner being told, so the adapter asks for them only 
 
 Then, on the routes the manifest marks `notices` (today `POST /recovery/verify`), the adapter sends
 `x-seamless-auth-delivery-kinds: account_notice_email,account_notice_sms`, hands each notice in the
-response to `deliver`, and strips them from what the client sees. If any notice fails, the request
-answers 502 `delivery_failed` after every notice has been tried. Without the option the API sends
+response to `deliver`, and strips them from what the client sees. Every notice is tried, and one
+that reaches the owner is enough. If none does, the API has already opened the recovery, so the
+adapter cancels it with the token from the notice's cancel link and answers 503
+`recovery_notice_failed`. Without the option the API sends
 notices itself. `cancel_url` (and `text`, which can hold it) is a credential: send it only to `to`
 and never log it.
 

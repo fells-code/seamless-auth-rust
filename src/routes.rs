@@ -4,7 +4,7 @@ use axum::body::Body;
 use axum::http::{
     HeaderMap, HeaderValue, Method, StatusCode, header::CONTENT_TYPE, request::Parts,
 };
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::adapter::{
     BodyError, Forwarded, Inner, Reply, UpstreamCall, bearer_token, failure, is_json_content_type,
@@ -282,19 +282,24 @@ impl Inner {
             };
             // Every notice is attempted: one transport failing is no reason to
             // keep the owner from hearing on the other.
-            let mut failed = 0;
+            let mut delivered = 0;
             for raw in &deliveries {
-                if let Err(err) = self.deliver(raw).await {
-                    failed += 1;
-                    tracing::warn!(
+                match self.deliver(raw).await {
+                    Ok(true) => delivered += 1,
+                    Ok(false) => {}
+                    Err(err) => tracing::warn!(
                         "[seamless-auth] Notice delivery for {} {} failed: {err}",
                         route.method,
                         route.path
-                    );
+                    ),
                 }
             }
-            if failed > 0 {
-                return Reply::error(StatusCode::BAD_GATEWAY, "delivery_failed").with_set(set);
+            // The auth API opened the request when it handed the notices back, so
+            // an owner who heard nothing must not be left with it running.
+            if !deliveries.is_empty() && delivered == 0 {
+                self.cancel_unnoticed_recovery(forwarded, &deliveries).await;
+                return Reply::error(StatusCode::SERVICE_UNAVAILABLE, "recovery_notice_failed")
+                    .with_set(set);
             }
         }
 
@@ -354,11 +359,11 @@ impl Inner {
         reply
     }
 
-    /// Hands one message to the application. A kind this version does not know
-    /// is skipped, never passed on half understood.
-    async fn deliver(&self, raw: &Value) -> Result<(), String> {
+    /// Hands one message to the application, reporting whether it was. A kind
+    /// this version does not know is skipped, never passed on half understood.
+    async fn deliver(&self, raw: &Value) -> Result<bool, String> {
         let Some(deliver) = self.config.deliver.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
         let delivery = parse_delivery(raw)?;
         if !KNOWN_KINDS.contains(&delivery.kind.as_str()) {
@@ -366,9 +371,44 @@ impl Inner {
                 "[seamless-auth] Skipping a delivery of unknown kind {:?}",
                 delivery.kind
             );
-            return Ok(());
+            return Ok(false);
         }
-        deliver(delivery).await.map_err(|e| e.to_string())
+        deliver(delivery)
+            .await
+            .map(|_| true)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Cancels a recovery request whose owner no notice reached, with the token
+    /// in the fragment of a notice's cancel link. Neither is ever logged.
+    async fn cancel_unnoticed_recovery(&self, forwarded: &Forwarded, deliveries: &[Value]) {
+        let token = deliveries.iter().find_map(|raw| {
+            raw.get("cancelUrl")
+                .and_then(Value::as_str)
+                .and_then(|url| url.split_once('#'))
+                .map(|(_, token)| token)
+                .filter(|token| !token.is_empty())
+        });
+        let Some(token) = token else {
+            tracing::warn!(
+                "[seamless-auth] No notice was delivered and none carried a cancel link"
+            );
+            return;
+        };
+        let mut call = UpstreamCall::new(Method::POST, "/recovery/cancel");
+        call.body = Some(json!({ "cancelToken": token }).to_string().into());
+        call.service = self.tokens.proxy_authorization();
+        match self.call(forwarded, call).await {
+            Ok(res) if res.status().is_success() => {}
+            Ok(res) => tracing::warn!(
+                "[seamless-auth] Cancelling an unnoticed recovery answered {}",
+                res.status().as_u16()
+            ),
+            Err(err) => tracing::warn!(
+                "[seamless-auth] Cancelling an unnoticed recovery failed: {}",
+                err.without_url()
+            ),
+        }
     }
 
     /// Refreshes the session after a recovery session enrolled a factor, so the
