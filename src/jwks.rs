@@ -133,6 +133,10 @@ impl JwksCache {
         issuer: &str,
         audience: &str,
     ) -> Result<Claims, String> {
+        // An empty expectation must never stand for "any issuer" or "any audience".
+        if issuer.is_empty() || audience.is_empty() {
+            return Err("no expected issuer or audience".into());
+        }
         let header = jsonwebtoken::decode_header(token).map_err(|e| e.to_string())?;
         if header.alg != Algorithm::RS256 {
             return Err("unexpected algorithm".into());

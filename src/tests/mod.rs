@@ -31,9 +31,16 @@ pub(crate) const TEST_SERVICE: &str = "service-secret-service-secret-service-sec
 
 const TEST_KEY_PEM: &str = include_str!("../testdata/rsa-test-only.pem");
 const TEST_KEY_N: &str = include_str!("../testdata/rsa-test-only.n");
+/// A key the fake API does not publish.
+pub(crate) const OTHER_KEY_PEM: &str = include_str!("../testdata/rsa-other-test-only.pem");
 
 /// Signs a token as the auth API would.
 pub(crate) fn sign_rs256(claims: Value) -> String {
+    sign_rs256_with(TEST_KEY_PEM, claims)
+}
+
+/// Signs a token under the API's key id with any RSA key.
+pub(crate) fn sign_rs256_with(pem: &str, claims: Value) -> String {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some("k1".into());
     let now = jsonwebtoken::get_current_timestamp();
@@ -41,7 +48,7 @@ pub(crate) fn sign_rs256(claims: Value) -> String {
     for (k, v) in claims.as_object().unwrap() {
         body[k] = v.clone();
     }
-    let key = EncodingKey::from_rsa_pem(TEST_KEY_PEM.as_bytes()).unwrap();
+    let key = EncodingKey::from_rsa_pem(pem.as_bytes()).unwrap();
     jsonwebtoken::encode(&header, &body, &key).unwrap()
 }
 
