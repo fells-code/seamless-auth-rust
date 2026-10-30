@@ -13,7 +13,7 @@ use tower_service::Service;
 
 use crate::adapter::{Adapter, Inner, bearer_token, json_response};
 use crate::cookies::{KIND_ACCESS, raw_cookie, read_cookie};
-use crate::jwt::{Claims, str_claim, unverified_claims};
+use crate::jwt::{Claims, str_claim};
 use crate::origin::check_origin;
 
 /// The session a request was authenticated with. [`RequireAuth`] puts it in the
@@ -87,6 +87,9 @@ impl Adapter {
     /// on any route. It does not refresh: silent refresh belongs to the auth
     /// routes, and a bearer client refreshes through `POST /auth/refresh` itself.
     ///
+    /// The access token inside a cookie is verified against the auth API's JWKS
+    /// like a bearer token, and the roles and recovery state come from it.
+    ///
     /// It accepts a recovery session, so check [`User::recovery`] before treating
     /// the user as fully signed in.
     pub async fn authenticate(&self, headers: &HeaderMap) -> Result<User, Unauthenticated> {
@@ -116,16 +119,29 @@ impl Inner {
         if raw_cookie(headers, name).is_some_and(|v| !v.is_empty()) {
             let claims =
                 read_cookie(&self.config, headers, name, KIND_ACCESS).ok_or(Unauthenticated)?;
+            let subject = str_claim(&claims, "sub");
             let token = str_claim(&claims, "token");
-            if str_claim(&claims, "sub").is_empty() || !is_access_token(token) {
+            if subject.is_empty() || token.is_empty() {
+                return Err(Unauthenticated);
+            }
+            // The cookie secret alone can sign a cookie, so the token inside is held
+            // to the API's key set and the session's authority comes from it.
+            let verified = self.verify_access_token(token).await?;
+            if str_claim(&verified, "sub") != subject {
                 return Err(Unauthenticated);
             }
             let mut user = user_from(&claims, token);
-            user.recovery = unverified_claims(token).is_some_and(|inner| is_recovery(&inner));
+            user.roles = roles(&verified);
+            user.recovery = is_recovery(&verified);
             return Ok((user, true));
         }
 
         let token = bearer_token(headers).ok_or(Unauthenticated)?;
+        let claims = self.verify_access_token(token).await?;
+        Ok((user_from(&claims, token), false))
+    }
+
+    async fn verify_access_token(&self, token: &str) -> Result<Claims, Unauthenticated> {
         let claims = self
             .jwks
             .verify(
@@ -140,15 +156,8 @@ impl Inner {
         if str_claim(&claims, "typ") != "access" || str_claim(&claims, "sub").is_empty() {
             return Err(Unauthenticated);
         }
-        Ok((user_from(&claims, token), false))
+        Ok(claims)
     }
-}
-
-/// Reads the type of the auth API token inside a session cookie. It was verified
-/// against the API's key set before the adapter signed it into the cookie, so its
-/// claims are read without verifying it again.
-fn is_access_token(token: &str) -> bool {
-    unverified_claims(token).is_some_and(|claims| str_claim(&claims, "typ") == "access")
 }
 
 pub(crate) fn is_recovery(claims: &Claims) -> bool {
@@ -163,22 +172,26 @@ fn user_from(claims: &Claims, token: &str) -> User {
     };
     User {
         id: str_claim(claims, "sub").to_string(),
-        roles: claims
-            .get("roles")
-            .and_then(Value::as_array)
-            .map(|roles| {
-                roles
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default(),
+        roles: roles(claims),
         email: optional("email"),
         phone: optional("phone"),
         token: token.to_string(),
         recovery: is_recovery(claims),
     }
+}
+
+fn roles(claims: &Claims) -> Vec<String> {
+    claims
+        .get("roles")
+        .and_then(Value::as_array)
+        .map(|roles| {
+            roles
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The layer [`Adapter::require_auth`] returns.

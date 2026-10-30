@@ -689,6 +689,164 @@ async fn cross_site_state_changes_are_blocked() {
 }
 
 #[tokio::test]
+async fn the_origin_guard_follows_sec_fetch_site() {
+    let api = FakeApi::start().await;
+    api.on("POST", "/login", respond(400, json!({ "error": "x" })));
+    let open = api.adapter(|b| b);
+    let listed = api.adapter(|b| b.allowed_origins(["https://app.example.com"]));
+    let lax = api.adapter(|b| b.same_site(crate::SameSite::Lax));
+    let unparseable = api.adapter(|b| b.allowed_origins(["not an origin"]));
+
+    type Case<'a> = (
+        &'a str,
+        &'a Adapter,
+        &'a str,
+        &'a [(&'a str, &'a str)],
+        bool,
+    );
+    let cases: [Case; 17] = [
+        (
+            "cross-site",
+            &open,
+            "POST",
+            &[("sec-fetch-site", "cross-site")],
+            true,
+        ),
+        (
+            "cross-site, any case",
+            &open,
+            "POST",
+            &[("sec-fetch-site", "Cross-Site")],
+            true,
+        ),
+        (
+            "same-origin",
+            &open,
+            "POST",
+            &[("sec-fetch-site", "same-origin")],
+            false,
+        ),
+        (
+            "same-site without an allowlist",
+            &open,
+            "POST",
+            &[("sec-fetch-site", "same-site")],
+            false,
+        ),
+        ("none", &open, "POST", &[("sec-fetch-site", "none")], false),
+        ("server to server", &open, "POST", &[], false),
+        ("null Origin", &open, "POST", &[("origin", "null")], true),
+        (
+            "cross-site GET",
+            &open,
+            "GET",
+            &[("sec-fetch-site", "cross-site")],
+            false,
+        ),
+        (
+            "cross-site preflight",
+            &open,
+            "OPTIONS",
+            &[("sec-fetch-site", "cross-site")],
+            false,
+        ),
+        (
+            "Lax cookies, cross-site",
+            &lax,
+            "POST",
+            &[("sec-fetch-site", "cross-site")],
+            false,
+        ),
+        (
+            "same-site from a listed Origin",
+            &listed,
+            "POST",
+            &[
+                ("sec-fetch-site", "same-site"),
+                ("origin", "https://APP.example.com"),
+            ],
+            false,
+        ),
+        (
+            "same-site from another Origin",
+            &listed,
+            "POST",
+            &[
+                ("sec-fetch-site", "same-site"),
+                ("origin", "https://evil.example.com"),
+            ],
+            true,
+        ),
+        (
+            "same-site with no Origin",
+            &listed,
+            "POST",
+            &[("sec-fetch-site", "same-site")],
+            true,
+        ),
+        (
+            "same-origin whatever the list says",
+            &listed,
+            "POST",
+            &[
+                ("sec-fetch-site", "same-origin"),
+                ("origin", "https://auth-adapter.example.com"),
+            ],
+            false,
+        ),
+        (
+            "cross-site from a listed Origin",
+            &listed,
+            "POST",
+            &[
+                ("sec-fetch-site", "cross-site"),
+                ("origin", "https://app.example.com"),
+            ],
+            true,
+        ),
+        // Neither normalizes, so they must not match each other.
+        (
+            "same-site, unparseable Origin and entry",
+            &unparseable,
+            "POST",
+            &[
+                ("sec-fetch-site", "same-site"),
+                ("origin", "also not an origin"),
+            ],
+            true,
+        ),
+        (
+            "no Sec-Fetch-Site, unparseable Origin and entry",
+            &unparseable,
+            "POST",
+            &[("origin", "also not an origin")],
+            true,
+        ),
+    ];
+
+    for (name, adapter, method, headers, blocked) in cases {
+        let mut request = call(method, "/login");
+        if method == "POST" {
+            request = request.body("{}");
+        }
+        for (k, v) in headers {
+            request = request.header(k, v);
+        }
+        let r = request.to(adapter).await;
+        if blocked {
+            assert_eq!(r.status, 403, "{name}: {}", r.text);
+            assert_eq!(
+                r.body,
+                json!({ "error": "cross_site_request_blocked" }),
+                "{name}"
+            );
+        } else {
+            assert_ne!(r.status, 403, "{name}: {}", r.text);
+        }
+    }
+}
+
+#[tokio::test]
 async fn the_live_manifest_adds_routes() {
     let api = FakeApi::start().await;
     api.set_manifest(json!({ "schemaVersion": 1, "routes": [{ "method": "GET", "path": "/brand-new/{id}", "credential": "access" }] }));

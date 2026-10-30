@@ -76,9 +76,23 @@ reads the `Cookie` header itself, so it works on any route. It does not refresh:
 refresh a browser session silently, and a bearer client calls `POST /auth/refresh` itself.
 `Adapter::authenticate(&HeaderMap)` does the same check without answering.
 
-A request the guard admits on the session cookie also gets the auth routes' cross-site check: while
-cookies are `SameSite=None`, a state-changing request from another site (`Sec-Fetch-Site:
-cross-site`, or an `Origin` outside `allowed_origins`) answers 403 `cross_site_request_blocked`.
+The cookie is signed with the cookie secret, and the auth API access token inside it is verified
+again against the API's JWKS, exactly as a bearer token is: RS256, the expected issuer and
+audience, in date, of type `access`, and for the cookie's subject. The user's roles and recovery
+state come from that verified token, so a cookie forged with a leaked cookie secret carries no
+claims of its own. When the JWKS cannot be fetched the session is refused.
+
+A request the guard admits on the session cookie also gets the auth routes' cross-site check. It
+applies only while cookies are `SameSite=None`, and only to state-changing methods (not `GET`,
+`HEAD` or `OPTIONS`); a refused request answers 403 `cross_site_request_blocked`:
+
+- `Sec-Fetch-Site: cross-site` is refused, and `same-origin` (or `none`) passes.
+- `Sec-Fetch-Site: same-site` also covers a sibling subdomain, so when `allowed_origins` is set
+  the `Origin` must be on it, and a request with no `Origin` is refused. Without
+  `allowed_origins` it passes.
+- With no `Sec-Fetch-Site` (an older browser or a server), a request with no `Origin` passes, a
+  `null` `Origin` is refused, and when `allowed_origins` is set the `Origin` must be on it.
+
 A bearer token is never attached by a browser, so it is not checked.
 
 ### Request bodies
@@ -101,7 +115,7 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `cookie_domain` | none | Cookie `Domain` |
 | `insecure_cookies` | `false` | Drops `Secure`, for local development over HTTP, and allows example secrets |
 | `same_site` | `None`, or `Lax` with `insecure_cookies` | Cookie `SameSite` |
-| `allowed_origins` | none | The only cross-origin callers allowed to change state while cookies are `SameSite=None` |
+| `allowed_origins` | none | The only cross-origin (including same-site) callers allowed to change state while cookies are `SameSite=None` |
 | `session_cookie_names` | `seamless-access`, `seamless-refresh` | Session cookie names |
 | `flow_cookie_names` | `seamless-ephemeral` | Sign-in flow cookie names |
 | `deliver` | none | Sends OTP codes and magic links through your own transports |

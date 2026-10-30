@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::routing::get;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::*;
 use crate::User;
@@ -295,4 +295,208 @@ fn debug_output_redacts_the_token() {
         recovery: false,
     };
     assert!(!format!("{user:?}").contains("live-access-token"));
+}
+
+fn access_cookie(sub: &str, token: &str, roles: Value) -> String {
+    signed_cookie(
+        "seamless-access",
+        json!({ "sub": sub, "token": token, "roles": roles, "email": "u1@example.com" }),
+    )
+}
+
+/// What a leaked cookie secret buys: any cookie, holding any inner token.
+#[tokio::test]
+async fn a_cookie_session_needs_an_inner_token_the_api_signed() {
+    let api = FakeApi::start().await;
+    let adapter = api.adapter(|b| b);
+    let claims = |extra: Value| {
+        let mut claims = json!({ "sub": "u1", "typ": "access", "iss": api.url, "aud": api.url });
+        for (k, v) in extra.as_object().unwrap() {
+            claims[k] = v.clone();
+        }
+        claims
+    };
+    let payload = sign_rs256(claims(json!({})))
+        .split('.')
+        .nth(1)
+        .unwrap()
+        .to_string();
+    // {"alg":"none","typ":"JWT"}
+    let unsigned = format!("eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.{payload}.");
+
+    let cases = [
+        ("valid", sign_rs256(claims(json!({}))), 200),
+        (
+            "another key",
+            sign_rs256_with(OTHER_KEY_PEM, claims(json!({}))),
+            401,
+        ),
+        ("unsigned", unsigned, 401),
+        (
+            "another audience",
+            sign_rs256(claims(json!({ "aud": "https://elsewhere" }))),
+            401,
+        ),
+        (
+            "another issuer",
+            sign_rs256(claims(json!({ "iss": "https://elsewhere" }))),
+            401,
+        ),
+        (
+            "expired",
+            sign_rs256(claims(json!({ "exp": 1_000_000 }))),
+            401,
+        ),
+        (
+            "not yet valid",
+            sign_rs256(claims(
+                json!({ "nbf": jsonwebtoken::get_current_timestamp() + 600 }),
+            )),
+            401,
+        ),
+        (
+            "ephemeral",
+            sign_rs256(claims(json!({ "typ": "ephemeral" }))),
+            401,
+        ),
+        (
+            "another subject",
+            sign_rs256(claims(json!({ "sub": "u2" }))),
+            401,
+        ),
+        ("not a token", "a.b.c".to_string(), 401),
+    ];
+
+    for (name, token, status) in cases {
+        let r = call("GET", "/api/me")
+            .cookie(&access_cookie("u1", &token, json!(["user"])))
+            .through(guarded(&adapter))
+            .await;
+        assert_eq!(r.status, status, "{name}: {}", r.text);
+        if status != 200 {
+            assert_eq!(r.body, json!({ "error": "unauthenticated" }), "{name}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_cookie_session_takes_its_roles_from_the_verified_token() {
+    let api = FakeApi::start().await;
+    let adapter = api.adapter(|b| b);
+    let token = sign_rs256(
+        json!({ "sub": "u1", "typ": "access", "iss": api.url, "aud": api.url, "roles": ["user"] }),
+    );
+    let cookie = access_cookie("u1", &token, json!(["admin"]));
+    let admin_only = Router::new().route(
+        "/api/admin",
+        get(|user: User| async move {
+            if user.roles.iter().any(|r| r == "admin") {
+                StatusCode::OK
+            } else {
+                StatusCode::FORBIDDEN
+            }
+        })
+        .route_layer(adapter.require_auth()),
+    );
+
+    let r = call("GET", "/api/me")
+        .cookie(&cookie)
+        .through(guarded(&adapter))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text);
+    assert_eq!(r.body["roles"], json!(["user"]));
+    let r = call("GET", "/api/admin")
+        .cookie(&cookie)
+        .through(admin_only)
+        .await;
+    assert_eq!(r.status, 403);
+
+    let mut headers = HeaderMap::new();
+    headers.insert("cookie", HeaderValue::from_str(&cookie).unwrap());
+    let user = adapter.authenticate(&headers).await.unwrap();
+    assert_eq!(user.roles, ["user"]);
+    assert_eq!(user.email.as_deref(), Some("u1@example.com"));
+    assert_eq!(user.token, token);
+}
+
+#[tokio::test]
+async fn a_cookie_session_fails_closed_when_the_jwks_is_unreachable() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let adapter = Adapter::builder(&url)
+        .cookie_secret(TEST_SECRET)
+        .service_secret(TEST_SERVICE)
+        .jwks_kid("test-main")
+        .disable_manifest_fetch(true)
+        .build()
+        .unwrap();
+    let token = sign_rs256(json!({ "sub": "u1", "typ": "access", "iss": url, "aud": url }));
+
+    let r = call("GET", "/api/me")
+        .cookie(&access_cookie("u1", &token, json!(["user"])))
+        .through(guarded(&adapter))
+        .await;
+    assert_eq!(r.status, 401, "{}", r.text);
+}
+
+#[tokio::test]
+async fn an_empty_audience_verifies_nothing() {
+    let api = FakeApi::start().await;
+    let adapter = api.adapter(|b| b.audience(""));
+    let token = sign_rs256(json!({ "sub": "u1", "typ": "access", "iss": api.url, "aud": "" }));
+
+    for (name, request) in [
+        (
+            "cookie",
+            call("GET", "/api/me").cookie(&access_cookie("u1", &token, json!(["user"]))),
+        ),
+        (
+            "bearer",
+            call("GET", "/api/me").header("authorization", &format!("Bearer {token}")),
+        ),
+    ] {
+        let r = request.through(guarded(&adapter)).await;
+        assert_eq!(r.status, 401, "{name}: {}", r.text);
+    }
+}
+
+#[tokio::test]
+async fn a_cookie_session_from_a_sibling_subdomain_needs_an_allowlisted_origin() {
+    let api = FakeApi::start().await;
+    let token = api.token("u1", "access");
+    let cookie = access_cookie("u1", &token, json!(["user"]));
+    let post = |adapter: &Adapter, origin: Option<&str>| {
+        let router = Router::new().route(
+            "/api/transfer",
+            axum::routing::post(|user: User| async move { user.id })
+                .route_layer(adapter.require_auth()),
+        );
+        let mut request = call("POST", "/api/transfer")
+            .cookie(&cookie)
+            .header("sec-fetch-site", "same-site");
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        request.through(router)
+    };
+
+    let listed = api.adapter(|b| b.allowed_origins(["https://app.example.com"]));
+    assert_eq!(
+        post(&listed, Some("https://app.example.com")).await.status,
+        200
+    );
+    assert_eq!(
+        post(&listed, Some("https://evil.example.com")).await.status,
+        403
+    );
+    assert_eq!(post(&listed, None).await.status, 403);
+
+    let unlisted = api.adapter(|b| b);
+    assert_eq!(
+        post(&unlisted, Some("https://evil.example.com"))
+            .await
+            .status,
+        200
+    );
 }

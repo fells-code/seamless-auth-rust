@@ -21,35 +21,47 @@ pub(crate) fn check_origin(config: &Config, method: &Method, headers: &HeaderMap
     };
 
     if let Some(site) = headers.get("sec-fetch-site") {
-        return if site.as_bytes().eq_ignore_ascii_case(b"cross-site") {
-            blocked()
-        } else {
-            None
+        let site = site.as_bytes();
+        if site.eq_ignore_ascii_case(b"cross-site") {
+            return blocked();
+        }
+        // A sibling subdomain is same-site too, so with an allowlist the Origin
+        // has to be on it.
+        if !site.eq_ignore_ascii_case(b"same-site") || config.allowed_origins.is_empty() {
+            return None;
+        }
+        return match headers.get("origin") {
+            Some(origin) if is_allowed(config, origin.as_bytes()) => None,
+            _ => blocked(),
         };
     }
 
     let origin = headers.get("origin")?;
-    // An Origin a browser would never send is not one to trust.
-    let Ok(origin) = origin.to_str() else {
-        return blocked();
-    };
     if origin == "null" {
         return blocked();
     }
-    if config.allowed_origins.is_empty() {
-        return None;
+    // An Origin a browser would never send is not one to trust.
+    if origin.to_str().is_err() {
+        return blocked();
     }
-
-    let origin = normalize_origin(origin);
-    if origin.is_some()
-        && config
-            .allowed_origins
-            .iter()
-            .any(|allowed| normalize_origin(allowed) == origin)
-    {
+    if config.allowed_origins.is_empty() || is_allowed(config, origin.as_bytes()) {
         return None;
     }
     blocked()
+}
+
+/// Whether an Origin is on the allowlist. An Origin, or an allowlist entry, that
+/// does not normalize never matches, so two unparseable values cannot pass for
+/// one another.
+fn is_allowed(config: &Config, origin: &[u8]) -> bool {
+    let Some(origin) = std::str::from_utf8(origin).ok().and_then(normalize_origin) else {
+        return false;
+    };
+    config
+        .allowed_origins
+        .iter()
+        .filter_map(|allowed| normalize_origin(allowed))
+        .any(|allowed| allowed == origin)
 }
 
 /// `scheme://host[:port]`, lowercased, or `None` for anything that is not one.

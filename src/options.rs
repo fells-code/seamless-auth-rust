@@ -215,7 +215,8 @@ impl Builder {
     }
 
     /// The only cross-origin callers allowed to change state while cookies are
-    /// `SameSite=None`.
+    /// `SameSite=None`. With it set, a `Sec-Fetch-Site: same-site` request (which
+    /// includes a sibling subdomain) needs an `Origin` on the list as well.
     pub fn allowed_origins<I, S>(mut self, origins: I) -> Self
     where
         I: IntoIterator<Item = S>,
