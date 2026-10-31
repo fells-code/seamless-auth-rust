@@ -37,8 +37,8 @@ fn guard_for(verifier: &Verifier, guard: &Value) -> Option<TokenGuardLayer> {
             .unwrap_or_default()
     };
     match guard["kind"].as_str()? {
-        "scope" => Some(verifier.require_scope(strings("scopes"))),
-        "role" => Some(verifier.require_role(strings("roles"))),
+        "scope" => Some(verifier.require_scope(strings("scopes")).unwrap()),
+        "role" => Some(verifier.require_role(strings("roles")).unwrap()),
         "step_up" => {
             let mut step_up = StepUp::new()
                 .acr_values(strings("acr_values"))
@@ -322,6 +322,22 @@ fn construction_errors() {
             .require_step_up(StepUp::new().acr_values(["bad\"value"]))
             .is_err()
     );
+
+    let empty: [&str; 0] = [];
+    assert_eq!(
+        verifier.require_scope(empty).map(|_| ()),
+        Err(VerifierBuildError::EmptyGuard)
+    );
+    assert!(verifier.require_scope([""]).is_err());
+    assert!(verifier.require_scope(["a b"]).is_err());
+    assert_eq!(
+        verifier.require_role(empty).map(|_| ()),
+        Err(VerifierBuildError::EmptyGuard)
+    );
+    assert_eq!(
+        verifier.require_role(["admin", " "]).map(|_| ()),
+        Err(VerifierBuildError::EmptyGuard)
+    );
 }
 
 #[tokio::test]
@@ -370,7 +386,7 @@ async fn guard_without_verification_answers_missing_token() {
         .unwrap();
     let app = Router::new().route(
         "/resource",
-        get(|| async { "ok" }).route_layer(verifier.require_scope(["x"])),
+        get(|| async { "ok" }).route_layer(verifier.require_scope(["x"]).unwrap()),
     );
     let (status, challenge, body) = send(app, Some("Bearer whatever")).await;
     assert_eq!(status, 401);

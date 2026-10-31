@@ -73,6 +73,8 @@ pub enum VerifierBuildError {
     InvalidJwksUri,
     /// A step-up guard names no `acr_values`, `amr` or `max_age`.
     EmptyStepUp,
+    /// A scope or role guard names no values, or an empty one.
+    EmptyGuard,
     /// A guard value cannot be carried in a `WWW-Authenticate` header.
     InvalidChallenge(String),
     /// The HTTP client could not be built.
@@ -94,6 +96,9 @@ impl fmt::Display for VerifierBuildError {
             VerifierBuildError::EmptyStepUp => {
                 f.write_str("seamless-auth: a step-up guard needs acr_values, amr or max_age")
             }
+            VerifierBuildError::EmptyGuard => f.write_str(
+                "seamless-auth: a scope or role guard needs at least one non-empty value",
+            ),
             VerifierBuildError::InvalidChallenge(what) => {
                 write!(f, "seamless-auth: {what:?} cannot be sent in a challenge")
             }
