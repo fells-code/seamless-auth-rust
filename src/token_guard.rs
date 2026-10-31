@@ -112,38 +112,53 @@ impl Verifier {
 
     /// A guard that answers 403 `insufficient_scope` unless the token has every
     /// one of `scopes`. Place it behind [`require_auth`](Self::require_auth).
-    pub fn require_scope<I, T>(&self, scopes: I) -> TokenGuardLayer
+    ///
+    /// An empty list, or an empty scope, is an error: a guard that requires
+    /// nothing would let every token through.
+    pub fn require_scope<I, T>(&self, scopes: I) -> Result<TokenGuardLayer, VerifierBuildError>
     where
         I: IntoIterator<Item = T>,
         T: Into<String>,
     {
         let required: Vec<String> = scopes.into_iter().map(Into::into).collect();
+        if required.is_empty() {
+            return Err(VerifierBuildError::EmptyGuard);
+        }
+        for scope in &required {
+            check_challenge_value(scope)?;
+        }
         let joined = required.join(" ");
         let challenge = HeaderValue::from_str(&format!(
             "Bearer error=\"insufficient_scope\", scope=\"{joined}\""
         ))
-        .unwrap_or_else(|_| HeaderValue::from_static("Bearer error=\"insufficient_scope\""));
-        TokenGuardLayer {
+        .map_err(|_| VerifierBuildError::InvalidChallenge(joined.clone()))?;
+        Ok(TokenGuardLayer {
             check: Arc::new(Check::Scope {
                 required,
                 joined,
                 challenge,
             }),
-        }
+        })
     }
 
     /// A guard that answers 403 `insufficient_role` unless one of the token's
     /// roles grants any one of `roles`, with scoped matching (`orders:write`
     /// grants `orders:read`, `orders` and `orders:*` grant `orders:...`). Place
     /// it behind [`require_auth`](Self::require_auth).
-    pub fn require_role<I, T>(&self, roles: I) -> TokenGuardLayer
+    ///
+    /// An empty list, or an empty role, is an error.
+    pub fn require_role<I, T>(&self, roles: I) -> Result<TokenGuardLayer, VerifierBuildError>
     where
         I: IntoIterator<Item = T>,
         T: Into<String>,
     {
-        TokenGuardLayer {
-            check: Arc::new(Check::Role(roles.into_iter().map(Into::into).collect())),
+        let required: Vec<String> = roles.into_iter().map(Into::into).collect();
+        if required.is_empty() || required.iter().any(|r| r.trim().is_empty()) {
+            return Err(VerifierBuildError::EmptyGuard);
         }
+        Ok(TokenGuardLayer {
+            check: Arc::new(Check::Role(required)),
+        })
     }
 
     /// A guard that answers 401 with the RFC 9470 `insufficient_user_authentication`
@@ -154,13 +169,7 @@ impl Verifier {
             return Err(VerifierBuildError::EmptyStepUp);
         }
         for value in &step_up.acr_values {
-            if value.is_empty()
-                || !value
-                    .bytes()
-                    .all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\')
-            {
-                return Err(VerifierBuildError::InvalidChallenge(value.clone()));
-            }
+            check_challenge_value(value)?;
         }
         let mut accepted_acr = step_up.acr_values.clone();
         if accepted_acr.iter().any(|v| v == "phr") {
@@ -174,6 +183,17 @@ impl Verifier {
             }),
         })
     }
+}
+
+fn check_challenge_value(value: &str) -> Result<(), VerifierBuildError> {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\')
+    {
+        return Err(VerifierBuildError::InvalidChallenge(value.to_string()));
+    }
+    Ok(())
 }
 
 impl Check {

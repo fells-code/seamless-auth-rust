@@ -126,18 +126,23 @@ fn verify_only_routes() -> Option<Router> {
     let step_up = verifier
         .require_step_up(StepUp::new().acr_values(["phr"]).max_age(300))
         .unwrap_or_else(|e| panic!("{e}"));
+    let orders = verifier
+        .require_scope(["orders:write"])
+        .unwrap_or_else(|e| panic!("{e}"));
+    let admin = verifier
+        .require_role(["admin"])
+        .unwrap_or_else(|e| panic!("{e}"));
     Some(
         Router::new()
             .route("/me", me().route_layer(verifier.require_auth()))
             .route(
                 "/orders",
-                me().route_layer(verifier.require_scope(["orders:write"]))
+                me().route_layer(orders)
                     .route_layer(verifier.require_auth()),
             )
             .route(
                 "/admin",
-                me().route_layer(verifier.require_role(["admin"]))
-                    .route_layer(verifier.require_auth()),
+                me().route_layer(admin).route_layer(verifier.require_auth()),
             )
             .route(
                 "/step-up",

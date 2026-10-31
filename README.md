@@ -255,13 +255,13 @@ let app: Router = Router::new()
     .route(
         "/orders",
         get(|user: TokenUser| async move { Json(serde_json::json!({ "sub": user.sub })) })
-            .route_layer(verifier.require_scope(["orders:write"]))
+            .route_layer(verifier.require_scope(["orders:write"])?)
             .route_layer(verifier.require_auth()),
     )
     .route(
         "/admin",
         get(admin)
-            .route_layer(verifier.require_role(["admin"]))
+            .route_layer(verifier.require_role(["admin"])?)
             .route_layer(verifier.require_auth()),
     )
     .route(
@@ -299,6 +299,10 @@ A token is accepted only when it is RS256 under a published signing key (`kid` r
 `orders:read`, and `orders` or `orders:*` grant every `orders:...` role. `require_step_up` takes any
 of `acr_values` (listing `phr` also accepts `phrh`), `amr` (all required) and `max_age` in seconds
 since `auth_time`.
+
+The guards return an error at setup when they would require nothing: `require_scope` or
+`require_role` with no values or an empty value, or `require_step_up` with none of its three
+settings.
 
 A token bound to a key (a `cnf` claim) is refused unless you add a `confirmation` hook. It gets the
 claim and the request, so a DPoP proof can be checked against `cnf.jkt`:
