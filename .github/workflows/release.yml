@@ -27,6 +27,7 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.repository_owner == 'fells-code'
     permissions:
       contents: write
@@ -54,6 +55,7 @@ jobs:
   release-pr:
     name: Release PR
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.repository_owner == 'fells-code'
     permissions:
       contents: write
