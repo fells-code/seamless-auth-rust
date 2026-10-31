@@ -8,6 +8,7 @@ mod magic_link;
 mod manifest;
 mod notices;
 mod recovery;
+mod verifier;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -29,7 +30,7 @@ use crate::{Adapter, Builder};
 pub(crate) const TEST_SECRET: &str = "cookie-secret-cookie-secret-cookie-secret";
 pub(crate) const TEST_SERVICE: &str = "service-secret-service-secret-service-secret";
 
-const TEST_KEY_PEM: &str = include_str!("../testdata/rsa-test-only.pem");
+pub(crate) const TEST_KEY_PEM: &str = include_str!("../testdata/rsa-test-only.pem");
 const TEST_KEY_N: &str = include_str!("../testdata/rsa-test-only.n");
 /// A key the fake API does not publish.
 pub(crate) const OTHER_KEY_PEM: &str = include_str!("../testdata/rsa-other-test-only.pem");

@@ -6,6 +6,9 @@
 //! Which routes it serves, and what each does to the session, comes from the auth
 //! API's adapter manifest.
 //!
+//! A resource server that only checks OpenID Provider access tokens uses a
+//! [`Verifier`] instead: an issuer and an audience, no cookies or secrets.
+//!
 //! ```no_run
 //! use axum::{Json, Router, routing::get};
 //! use seamless_auth::{Adapter, User};
@@ -49,6 +52,8 @@ mod origin;
 mod refresh;
 mod routes;
 mod service_token;
+mod token_guard;
+mod verifier;
 
 #[cfg(test)]
 mod tests;
@@ -59,3 +64,7 @@ pub use delivery::{Delivery, DeliveryError};
 pub use guard::{RequireAuth, RequireAuthLayer, Unauthenticated, User};
 pub use manifest::{MANIFEST_PATH, Manifest, ManifestError, ManifestRoute, PickBody};
 pub use options::{BuildError, Builder, SameSite};
+pub use token_guard::{RequireToken, RequireTokenLayer, StepUp, TokenGuard, TokenGuardLayer};
+pub use verifier::{
+    Confirmation, TokenError, TokenUser, Verifier, VerifierBuildError, VerifierBuilder,
+};

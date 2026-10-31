@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
+use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::jwt::{CLOCK_SKEW_SECS, Claims};
@@ -26,11 +27,19 @@ pub(crate) struct JwksCache {
 
 #[derive(Default)]
 struct KeySet {
-    keys: Option<HashMap<String, DecodingKey>>,
+    keys: Option<HashMap<String, Key>>,
     /// When `keys` was last fetched.
     fetched_at: Option<Instant>,
     /// When a fetch was last tried, whether it worked or not.
     attempted_at: Option<Instant>,
+}
+
+/// A published RSA key, with the `use` and `alg` it was published under.
+#[derive(Clone)]
+pub(crate) struct Key {
+    pub decoding: DecodingKey,
+    pub usage: Option<Value>,
+    pub alg: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +52,10 @@ struct Jwk {
     n: String,
     #[serde(default)]
     e: String,
+    #[serde(default, rename = "use")]
+    usage: Option<Value>,
+    #[serde(default)]
+    alg: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -52,14 +65,18 @@ struct JwkSet {
 
 impl JwksCache {
     pub fn new(auth_server_url: &str, client: reqwest::Client) -> Self {
+        Self::at(format!("{auth_server_url}/.well-known/jwks.json"), client)
+    }
+
+    pub fn at(url: String, client: reqwest::Client) -> Self {
         JwksCache {
-            url: format!("{auth_server_url}/.well-known/jwks.json"),
+            url,
             client,
             state: Mutex::new(KeySet::default()),
         }
     }
 
-    async fn key(&self, kid: &str) -> Result<DecodingKey, String> {
+    pub async fn key(&self, kid: &str) -> Result<Key, String> {
         let mut state = self.state.lock().await;
 
         let fresh = state.fetched_at.is_some_and(|at| at.elapsed() < MAX_AGE);
@@ -97,7 +114,7 @@ impl JwksCache {
             .ok_or_else(|| format!("unknown key id {kid:?}"))
     }
 
-    async fn fetch(&self) -> Result<HashMap<String, DecodingKey>, String> {
+    async fn fetch(&self) -> Result<HashMap<String, Key>, String> {
         let res = self
             .client
             .get(&self.url)
@@ -118,8 +135,15 @@ impl JwksCache {
             if jwk.kty != "RSA" {
                 continue;
             }
-            if let Ok(key) = DecodingKey::from_rsa_components(&jwk.n, &jwk.e) {
-                keys.insert(jwk.kid, key);
+            if let Ok(decoding) = DecodingKey::from_rsa_components(&jwk.n, &jwk.e) {
+                keys.insert(
+                    jwk.kid,
+                    Key {
+                        decoding,
+                        usage: jwk.usage,
+                        alg: jwk.alg,
+                    },
+                );
             }
         }
         Ok(keys)
@@ -150,7 +174,7 @@ impl JwksCache {
         validation.set_audience(&[audience]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
 
-        jsonwebtoken::decode::<Claims>(token, &key, &validation)
+        jsonwebtoken::decode::<Claims>(token, &key.decoding, &validation)
             .map(|data| data.claims)
             .map_err(|e| e.to_string())
     }

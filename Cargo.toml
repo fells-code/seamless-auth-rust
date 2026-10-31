@@ -22,6 +22,9 @@ rustls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
 
 [dependencies]
+# Decodes a verify-only token's header and claims as raw JSON, so members like
+# `crit` are seen as sent. Already in jsonwebtoken's tree.
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 # The router, extractors and ConnectInfo the adapter plugs into.
 axum = { version = "0.8.4", default-features = false, features = ["tokio"] }
 # Reads a request body with a size limit. Already in axum's tree.
