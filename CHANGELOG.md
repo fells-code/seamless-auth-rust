@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/fells-code/seamless-auth-rust/compare/v0.3.0...v0.4.0) - 2026-10-31
+
+### Added
+
+- verify-only resource server mode with audience, scope, role and step-up guards
+
+### Fixed
+
+- refuse scope and role guards that require nothing
+- Origin allowlist with Sec-Fetch-Site, and verify the cookie's inner access token
+
 ## [0.3.0](https://github.com/fells-code/seamless-auth-rust/compare/v0.2.1...v0.3.0) - 2026-10-25
 
 ### Added
