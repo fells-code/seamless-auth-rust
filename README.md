@@ -15,6 +15,9 @@ The adapter sits in your backend between your users and the Seamless Auth API:
 Which routes the adapter serves, and what each does to the session, comes from the adapter
 manifest the auth API publishes, so a new API route works without a new release of this crate.
 
+A service that only checks OpenID Provider access tokens can use [verify-only mode](#verify-only-mode)
+instead, with no cookies, secrets or auth routes.
+
 It is held to the same [conformance suite](https://github.com/fells-code/seamless-cli/blob/main/verify/CONFORMANCE.md)
 as the Express, Fastify and Go adapters, in CI on every change.
 
@@ -234,6 +237,79 @@ encoded separators), and follows a redirect only while it stays inside the conso
 When you serve it, add your API's origin to the auth server's `ORIGINS` so passkey ceremonies
 started in the console verify.
 
+## Verify-only mode
+
+A service that only receives access tokens from the Seamless OpenID Provider (RFC 9068 JWTs in
+`Authorization: Bearer`) needs no cookies, no service secret and no auth routes. `Verifier` checks
+those tokens with only the issuer and this API's resource identifier:
+
+```rust
+use axum::{Json, Router, routing::get};
+use seamless_auth::{StepUp, TokenUser, Verifier};
+
+let verifier = Verifier::builder("https://login.example.com")
+    .audience("https://api.example.com")
+    .build()?;
+
+let app: Router = Router::new()
+    .route(
+        "/orders",
+        get(|user: TokenUser| async move { Json(serde_json::json!({ "sub": user.sub })) })
+            .route_layer(verifier.require_scope(["orders:write"]))
+            .route_layer(verifier.require_auth()),
+    )
+    .route(
+        "/admin",
+        get(admin)
+            .route_layer(verifier.require_role(["admin"]))
+            .route_layer(verifier.require_auth()),
+    )
+    .route(
+        "/payouts",
+        get(payouts)
+            .route_layer(verifier.require_step_up(StepUp::new().acr_values(["phr"]).max_age(300))?)
+            .route_layer(verifier.require_auth()),
+    );
+```
+
+In axum the last `route_layer` runs first, so add `require_auth()` last. A guard reached without a
+verified token answers as if no token was sent.
+
+The verifier finds the provider's JWKS from `<issuer>/.well-known/openid-configuration` on the
+first request (the document's `issuer` must equal yours, and its `jwks_uri` must be https under an
+https issuer), or uses `jwks_uri(...)` when you set one. If discovery or the key fetch fails, the
+request answers 401 and discovery is tried again at most every 5 seconds.
+
+A token is accepted only when it is RS256 under a published signing key (`kid` required, the key's
+`use` and `alg` when present must be `sig` and `RS256`), with header `typ` `at+jwt`, no `crit`,
+`iss` equal to the issuer, `aud` naming the audience, in date (5 seconds of clock skew), and with
+`sub` and `client_id`. A first-party session token (one with a `typ` claim) is refused.
+`TokenUser` carries `sub`, `client_id`, `scopes`, `roles`, `sid`, `org_id`, `acr`, `amr` and
+`auth_time`. A client-credentials token has no user claims, so it passes scope guards only.
+
+| Outcome | Status | `WWW-Authenticate` | Body |
+| --- | --- | --- | --- |
+| No bearer token | 401 | `Bearer` | `{"error":"missing_token"}` |
+| Token refused | 401 | `Bearer error="invalid_token"` | `{"error":"invalid_token"}` |
+| `require_scope`: not every scope granted | 403 | `Bearer error="insufficient_scope", scope="..."` | `{"error":"insufficient_scope","scope":"..."}` |
+| `require_role`: no listed role granted | 403 | none | `{"error":"insufficient_role"}` |
+| `require_step_up`: not met | 401 | `Bearer error="insufficient_user_authentication", ...` (RFC 9470) | `{"error":"insufficient_user_authentication",...}` |
+
+`require_role` uses the same scoped matching as the JS adapters: `orders:write` grants
+`orders:read`, and `orders` or `orders:*` grant every `orders:...` role. `require_step_up` takes any
+of `acr_values` (listing `phr` also accepts `phrh`), `amr` (all required) and `max_age` in seconds
+since `auth_time`.
+
+A token bound to a key (a `cnf` claim) is refused unless you add a `confirmation` hook. It gets the
+claim and the request, so a DPoP proof can be checked against `cnf.jkt`:
+
+```rust
+let verifier = Verifier::builder(issuer)
+    .audience(audience)
+    .confirmation(|c: seamless_auth::Confirmation| async move { check_dpop(&c.cnf, &c.headers) })
+    .build()?;
+```
+
 ## Features
 
 | Feature | Default | Purpose |
@@ -264,6 +340,11 @@ PORT=8080 AUTH_SERVER_URL=http://localhost:5312 AUTH_SERVER_ISSUER=http://auth-a
 
 SEAMLESS_API_DIR=../seamless-auth-api seamless verify --adapter-url=http://localhost:8080
 ```
+
+With `VERIFY_ONLY_ISSUER` and `VERIFY_ONLY_AUDIENCE` set (and `VERIFY_ONLY_JWKS_URI` to skip
+discovery), the reference app also serves verify-only routes under `/verify-only`: `/me`,
+`/orders` (scope `orders:write`), `/admin` (role `admin`) and `/step-up` (`acr` `phr` within 300
+seconds).
 
 ## Status
 

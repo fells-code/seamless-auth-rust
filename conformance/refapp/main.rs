@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use axum::extract::Path;
 use axum::routing::get;
 use axum::{Json, Router};
-use seamless_auth::{Adapter, Delivery, User};
+use seamless_auth::{Adapter, Delivery, StepUp, TokenUser, User, Verifier};
 use serde_json::{Value, json};
 
 type Captured = Arc<Mutex<HashMap<String, Value>>>;
@@ -82,6 +82,10 @@ async fn main() {
                 .route_layer(auth.require_auth()),
         )
         .nest("/auth", auth.router());
+    let app = match verify_only_routes() {
+        Some(routes) => app.nest("/verify-only", routes),
+        None => app,
+    };
 
     let port = std::env::var("PORT")
         .ok()
@@ -97,6 +101,50 @@ async fn main() {
     )
     .await
     .expect("serve");
+}
+
+/// Verify-only resource routes, mounted when `VERIFY_ONLY_ISSUER` and
+/// `VERIFY_ONLY_AUDIENCE` are set. `VERIFY_ONLY_JWKS_URI` skips discovery.
+fn verify_only_routes() -> Option<Router> {
+    let issuer = std::env::var("VERIFY_ONLY_ISSUER").ok()?;
+    let audience = std::env::var("VERIFY_ONLY_AUDIENCE").ok()?;
+    let mut builder = Verifier::builder(issuer).audience(audience);
+    if let Ok(uri) = std::env::var("VERIFY_ONLY_JWKS_URI") {
+        builder = builder.jwks_uri(uri);
+    }
+    let verifier = builder.build().unwrap_or_else(|e| panic!("{e}"));
+    let me = || {
+        get(|user: TokenUser| async move {
+            Json(json!({
+                "sub": user.sub,
+                "client_id": user.client_id,
+                "scopes": user.scopes,
+                "roles": user.roles,
+            }))
+        })
+    };
+    let step_up = verifier
+        .require_step_up(StepUp::new().acr_values(["phr"]).max_age(300))
+        .unwrap_or_else(|e| panic!("{e}"));
+    Some(
+        Router::new()
+            .route("/me", me().route_layer(verifier.require_auth()))
+            .route(
+                "/orders",
+                me().route_layer(verifier.require_scope(["orders:write"]))
+                    .route_layer(verifier.require_auth()),
+            )
+            .route(
+                "/admin",
+                me().route_layer(verifier.require_role(["admin"]))
+                    .route_layer(verifier.require_auth()),
+            )
+            .route(
+                "/step-up",
+                me().route_layer(step_up)
+                    .route_layer(verifier.require_auth()),
+            ),
+    )
 }
 
 fn env(name: &str) -> String {
