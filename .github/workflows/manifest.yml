@@ -1,0 +1,22 @@
+name: manifest
+
+# The bundled adapter manifest must match the one seamless-auth-api main
+# publishes. The schedule catches API route changes that land between PRs here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-manifest.sh
