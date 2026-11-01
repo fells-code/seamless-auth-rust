@@ -6,7 +6,9 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Request};
-use axum::http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, SET_COOKIE};
+use axum::http::header::{
+    CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, RETRY_AFTER, SET_COOKIE,
+};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, request::Parts};
 use axum::response::Response;
 use axum::routing::any;
@@ -103,6 +105,7 @@ pub(crate) struct Reply {
     pub raw: Option<reqwest::Response>,
     pub set: Vec<CookieWrite>,
     pub clear: Vec<String>,
+    pub retry_after: Option<HeaderValue>,
 }
 
 impl Reply {
@@ -113,6 +116,7 @@ impl Reply {
             raw: None,
             set: Vec::new(),
             clear: Vec::new(),
+            retry_after: None,
         }
     }
 
@@ -127,6 +131,11 @@ impl Reply {
 
     pub fn with_clear(mut self, clear: Vec<String>) -> Self {
         self.clear = clear;
+        self
+    }
+
+    pub fn with_retry_after(mut self, retry_after: Option<HeaderValue>) -> Self {
+        self.retry_after = retry_after;
         self
     }
 }
@@ -285,6 +294,9 @@ impl Inner {
             res
         };
 
+        if let Some(value) = reply.retry_after {
+            res.headers_mut().insert(RETRY_AFTER, value);
+        }
         for value in cookies.get_all(SET_COOKIE) {
             res.headers_mut().append(SET_COOKIE, value.clone());
         }

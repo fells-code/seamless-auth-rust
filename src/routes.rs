@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{
-    HeaderMap, HeaderValue, Method, StatusCode, header::CONTENT_TYPE, request::Parts,
+    HeaderMap, HeaderValue, Method, StatusCode,
+    header::{CONTENT_TYPE, RETRY_AFTER},
+    request::Parts,
 };
 use serde_json::{Map, Value, json};
 
@@ -251,9 +253,12 @@ impl Inner {
             return reply;
         }
 
+        let retry_after = res.headers().get(RETRY_AFTER).cloned();
         let (mut data, is_json) = read_json(res).await;
         if !status.is_success() {
-            return failure(status, data, is_json).with_set(set);
+            return failure(status, data, is_json)
+                .with_set(set)
+                .with_retry_after(retry_after);
         }
 
         if route.delivery
