@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "apiVersion": "0.19.4",
+  "apiVersion": "0.21.1",
   "session": {
     "subject": "sub",
     "token": "token",
@@ -9,6 +9,15 @@
     "refreshTtl": "refreshTtl"
   },
   "routes": [
+    { "method": "GET", "path": "/admin/applications", "credential": "access" },
+    { "method": "POST", "path": "/admin/applications", "credential": "access" },
+    { "method": "DELETE", "path": "/admin/applications/{id}", "credential": "access" },
+    { "method": "GET", "path": "/admin/applications/{id}", "credential": "access" },
+    { "method": "PATCH", "path": "/admin/applications/{id}", "credential": "access" },
+    { "method": "PUT", "path": "/admin/applications/{id}/keys", "credential": "access" },
+    { "method": "GET", "path": "/admin/applications/{id}/resources", "credential": "access" },
+    { "method": "PUT", "path": "/admin/applications/{id}/resources", "credential": "access" },
+    { "method": "POST", "path": "/admin/applications/{id}/secret", "credential": "access" },
     { "method": "GET", "path": "/admin/auth-events", "credential": "access" },
     { "method": "GET", "path": "/admin/auth-events/export", "credential": "access" },
     { "method": "GET", "path": "/admin/auth-events/integrity", "credential": "access" },
@@ -51,6 +60,11 @@
       "credential": "access"
     },
     { "method": "GET", "path": "/admin/reports/authentication-coverage", "credential": "access" },
+    { "method": "GET", "path": "/admin/resources", "credential": "access" },
+    { "method": "POST", "path": "/admin/resources", "credential": "access" },
+    { "method": "DELETE", "path": "/admin/resources/{id}", "credential": "access" },
+    { "method": "GET", "path": "/admin/resources/{id}", "credential": "access" },
+    { "method": "PATCH", "path": "/admin/resources/{id}", "credential": "access" },
     { "method": "GET", "path": "/admin/review-accounts", "credential": "access" },
     { "method": "GET", "path": "/admin/sessions", "credential": "access" },
     { "method": "GET", "path": "/admin/sessions/{userId}", "credential": "access" },
@@ -219,6 +233,11 @@
     { "method": "POST", "path": "/system-config/oauth-providers", "credential": "access" },
     { "method": "DELETE", "path": "/system-config/oauth-providers/{id}", "credential": "access" },
     { "method": "PATCH", "path": "/system-config/oauth-providers/{id}", "credential": "access" },
+    {
+      "method": "POST",
+      "path": "/system-config/oauth-providers/{id}/discovery",
+      "credential": "access"
+    },
     { "method": "GET", "path": "/system-config/policy", "credential": "access" },
     { "method": "DELETE", "path": "/system-config/policy/draft", "credential": "access" },
     { "method": "PUT", "path": "/system-config/policy/draft", "credential": "access" },

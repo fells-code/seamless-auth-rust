@@ -53,6 +53,7 @@ guidance may extend them but must not contradict them.
 | Tests | `cargo test` |
 | MSRV | `cargo +1.88 test` |
 | Conformance | see README, "Conformance" |
+| Manifest | `scripts/check-manifest.sh` (fix with `scripts/sync-manifest.sh`) |
 
 The crate targets Rust 1.88 (`rust-version` in `Cargo.toml`), set by jsonwebtoken 11. Do not use
 language or standard library features newer than that (CI runs 1.88). `Cargo.lock` is committed
@@ -100,5 +101,8 @@ version, edit the changelog's released sections, or tag by hand:
   did not declare.
 - Merging that PR tests the crate, publishes it to crates.io through trusted publishing (no token
   in the repository), tags `vX.Y.Z`, and creates the GitHub release.
+- The bundled manifest must match the one seamless-auth-api main publishes. The `manifest`
+  workflow checks it on every PR, on `main` and daily. Update it with `scripts/sync-manifest.sh`
+  in a `fix:` commit so the new routes ship in a patch release.
 
 Pre-1.0: a breaking change is a minor bump, and 1.0 is a deliberate decision, not a side effect.
