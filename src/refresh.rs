@@ -3,7 +3,8 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::header::RETRY_AFTER;
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use serde_json::Value;
 use tokio::sync::watch;
 
@@ -25,6 +26,7 @@ pub(crate) enum RefreshOutcome {
         status: StatusCode,
         body: Option<Value>,
         is_json: bool,
+        retry_after: Option<HeaderValue>,
     },
     Failed(String),
 }
@@ -226,12 +228,14 @@ impl Inner {
             Err(err) => return RefreshOutcome::Failed(err.without_url().to_string()),
         };
         let status = res.status();
+        let retry_after = res.headers().get(RETRY_AFTER).cloned();
         let (body, is_json) = read_json(res).await;
         if status != StatusCode::OK {
             return RefreshOutcome::Rejected {
                 status,
                 body,
                 is_json,
+                retry_after,
             };
         }
         match body {
@@ -277,7 +281,8 @@ impl Inner {
                     status,
                     body,
                     is_json,
-                } => failure(status, body, is_json),
+                    retry_after,
+                } => failure(status, body, is_json).with_retry_after(retry_after),
                 RefreshOutcome::Failed(_) => {
                     Reply::error(StatusCode::BAD_GATEWAY, "upstream_unavailable")
                 }
@@ -303,8 +308,10 @@ impl Inner {
         }
     }
 
-    /// Answers 204 and clears every held cookie, even when the auth API refuses,
-    /// so a browser is never left holding a session it asked to end.
+    /// Clears every held cookie whatever the outcome, so a browser is never left
+    /// holding a session it asked to end. Answers 204 when the auth API ends the
+    /// session, the API's own status when it refuses, 401 when the request
+    /// carries no readable session, and 502 when the API cannot be reached.
     pub(crate) async fn logout_route(
         self: &Arc<Self>,
         headers: &HeaderMap,
@@ -315,6 +322,7 @@ impl Inner {
         let clears = vec![
             self.config.access_cookie_name.clone(),
             self.config.registration_cookie_name.clone(),
+            self.config.pre_auth_cookie_name.clone(),
             self.config.refresh_cookie_name.clone(),
         ];
 
@@ -334,14 +342,12 @@ impl Inner {
             Err(_) => {
                 Reply::error(StatusCode::BAD_GATEWAY, "upstream_unavailable").with_clear(clears)
             }
-            Ok(res) => {
-                let status = if res.status().is_success() {
-                    StatusCode::NO_CONTENT
-                } else {
-                    res.status()
-                };
-                Reply::new(status, None).with_clear(clears)
+            Ok(res) if res.status().is_success() => {
+                Reply::new(StatusCode::NO_CONTENT, None).with_clear(clears)
             }
+            Ok(res) => Reply::new(res.status(), None)
+                .with_clear(clears)
+                .with_retry_after(res.headers().get(RETRY_AFTER).cloned()),
         }
     }
 }

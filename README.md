@@ -98,12 +98,57 @@ applies only while cookies are `SameSite=None`, and only to state-changing metho
 
 A bearer token is never attached by a browser, so it is not checked.
 
+`User` carries `id`, `roles`, `email`, `phone`, `token`, `recovery` and `organization_id`. The
+organization is the `org_id` claim of the verified access token, `None` when the session has
+none; the cookie's own copy is never read.
+
+### Roles
+
+`require_role([...])` does what `require_auth()` does, then answers 403
+`{"error":"insufficient_role"}` unless one of the user's roles grants any one of the listed roles.
+The body never names the user's roles or the required ones. Matching is scoped, as in
+`@seamless-auth/types`: `orders:*` grants `orders` and `orders:...`, an unscoped `orders` grants
+`orders:...`, and `orders:write` grants `orders:read`. Roles come from the verified access token.
+An empty list, or an empty role, is refused with `BuildError::EmptyGuard`, since a guard that
+requires nothing would let every session through.
+
+```rust
+let admin = auth.require_role(["admin", "orders:write"])?;
+let app: Router = Router::new()
+    .route("/api/orders", post(refund).route_layer(admin));
+```
+
+`User::has_role("orders:read")` applies the same matching inside a handler. A recovery session
+still answers 403 `enrollment_required` unless the layer is built with `.allow_recovery(true)`.
+
+### Optional user
+
+`Option<User>` is an extractor that never rejects. It yields the user exactly when
+`require_auth()` with default options would let the request through, and `None` otherwise,
+including for a recovery session. On a route with no guard, add `optional_auth()`, a layer that
+looks up the session and never answers itself:
+
+```rust
+get(|user: Option<User>| async move { /* signed in or not */ })
+    .route_layer(auth.optional_auth())
+```
+
 ### Request bodies
 
 The auth routes forward a request body to the auth API as JSON, so a body must be sent as
 `application/json` (or a `+json` type). Anything else answers 415 `unsupported_media_type`: a
 cross-site form can post a `text/plain` body shaped like JSON with no CORS preflight, and read as
 JSON it would be a sign-in the user never made. The client SDKs already send JSON.
+
+### Errors and logout
+
+An error from the auth API goes back with its status, its JSON body and its `Retry-After` header,
+so a client that hit a rate limit knows when to try again.
+
+`DELETE /auth/logout` (and `/auth/logout/all`) clears the access, refresh, registration and
+pre-auth cookies whatever the outcome. It answers 204 when the auth API ends the session, the
+API's status when it refuses, 401 when the request carries no readable session, and 502 when the
+API cannot be reached.
 
 ## Options
 

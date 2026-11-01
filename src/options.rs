@@ -66,6 +66,8 @@ pub enum BuildError {
     InvalidCookieAttribute(String),
     /// The HTTP client could not be built.
     HttpClient(String),
+    /// A role guard names no roles, or an empty one.
+    EmptyGuard,
 }
 
 impl fmt::Display for BuildError {
@@ -93,6 +95,9 @@ impl fmt::Display for BuildError {
             }
             BuildError::HttpClient(err) => {
                 write!(f, "seamless-auth: could not build the HTTP client: {err}")
+            }
+            BuildError::EmptyGuard => {
+                f.write_str("seamless-auth: a role guard needs at least one non-empty role")
             }
         }
     }

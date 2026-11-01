@@ -1,10 +1,11 @@
+use std::convert::Infallible;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use axum::extract::{FromRequestParts, Request};
+use axum::extract::{FromRequestParts, OptionalFromRequestParts, Request};
 use axum::http::{HeaderMap, StatusCode, request::Parts};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
@@ -14,10 +15,18 @@ use tower_service::Service;
 use crate::adapter::{Adapter, Inner, bearer_token, json_response};
 use crate::cookies::{KIND_ACCESS, raw_cookie, read_cookie};
 use crate::jwt::{Claims, str_claim};
+use crate::options::BuildError;
 use crate::origin::check_origin;
+use crate::token_guard::role_grants_access;
 
 /// The session a request was authenticated with. [`RequireAuth`] puts it in the
 /// request extensions, and it is an extractor for handlers behind the guard.
+///
+/// `Option<User>` is an extractor too. It yields the user exactly when
+/// [`Adapter::require_auth`] with default options would let the request through,
+/// and `None` otherwise, including for a recovery session. It never rejects. On
+/// a route with no guard in front, put [`Adapter::optional_auth`] there so it
+/// has a session to read.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct User {
@@ -31,6 +40,19 @@ pub struct User {
     /// recovery, and able to do little but enroll a new passkey or authenticator
     /// app. [`Adapter::require_auth`] refuses one unless told otherwise.
     pub recovery: bool,
+    /// The active organization, from the `org_id` claim of the verified access
+    /// token. `None` when the session has no organization.
+    pub organization_id: Option<String>,
+}
+
+impl User {
+    /// Whether any of the user's roles grants `role`, with the same scoped
+    /// matching as [`Adapter::require_role`].
+    pub fn has_role(&self, role: &str) -> bool {
+        self.roles
+            .iter()
+            .any(|granted| role_grants_access(granted, role))
+    }
 }
 
 // The token is a live credential, so it stays out of logs that print a User.
@@ -43,6 +65,7 @@ impl fmt::Debug for User {
             .field("phone", &self.phone)
             .field("token", &"[redacted]")
             .field("recovery", &self.recovery)
+            .field("organization_id", &self.organization_id)
             .finish()
     }
 }
@@ -80,6 +103,21 @@ impl<S: Send + Sync> FromRequestParts<S> for User {
     }
 }
 
+impl<S: Send + Sync> OptionalFromRequestParts<S> for User {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        Ok(parts
+            .extensions
+            .get::<User>()
+            .filter(|user| !user.recovery)
+            .cloned())
+    }
+}
+
 impl Adapter {
     /// Verifies a request's session: the adapter's access cookie, or an auth API
     /// access token in `Authorization: Bearer` for clients with no cookie jar. The
@@ -107,6 +145,42 @@ impl Adapter {
         RequireAuthLayer {
             inner: self.inner.clone(),
             allow_recovery: false,
+            roles: Arc::from([]),
+            optional: false,
+        }
+    }
+
+    /// A layer that does what [`require_auth`](Self::require_auth) does, then
+    /// answers 403 `{"error":"insufficient_role"}` unless one of the user's
+    /// roles grants any one of `roles`. Matching is scoped: `orders:write`
+    /// grants `orders:read`, and `orders` or `orders:*` grant `orders:...`.
+    /// Roles come from the verified access token, never from the cookie alone.
+    ///
+    /// An empty list, or an empty role, is an error: a guard that requires
+    /// nothing would let every session through.
+    pub fn require_role<I, T>(&self, roles: I) -> Result<RequireAuthLayer, BuildError>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        let roles: Vec<String> = roles.into_iter().map(Into::into).collect();
+        if roles.is_empty() || roles.iter().any(|r| r.trim().is_empty()) {
+            return Err(BuildError::EmptyGuard);
+        }
+        Ok(RequireAuthLayer {
+            roles: roles.into(),
+            ..self.require_auth()
+        })
+    }
+
+    /// A layer that never answers itself. It puts the [`User`] in the request
+    /// extensions when [`require_auth`](Self::require_auth) would let the
+    /// request through, and nothing otherwise, for handlers that take
+    /// `Option<User>` on routes open to everyone.
+    pub fn optional_auth(&self) -> RequireAuthLayer {
+        RequireAuthLayer {
+            optional: true,
+            ..self.require_auth()
         }
     }
 }
@@ -133,6 +207,7 @@ impl Inner {
             let mut user = user_from(&claims, token);
             user.roles = roles(&verified);
             user.recovery = is_recovery(&verified);
+            user.organization_id = optional_claim(&verified, "org_id");
             return Ok((user, true));
         }
 
@@ -164,19 +239,21 @@ pub(crate) fn is_recovery(claims: &Claims) -> bool {
     claims.get("recovery") == Some(&Value::Bool(true))
 }
 
+fn optional_claim(claims: &Claims, name: &str) -> Option<String> {
+    Some(str_claim(claims, name))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn user_from(claims: &Claims, token: &str) -> User {
-    let optional = |name: &str| {
-        Some(str_claim(claims, name))
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    };
     User {
         id: str_claim(claims, "sub").to_string(),
         roles: roles(claims),
-        email: optional("email"),
-        phone: optional("phone"),
+        email: optional_claim(claims, "email"),
+        phone: optional_claim(claims, "phone"),
         token: token.to_string(),
         recovery: is_recovery(claims),
+        organization_id: optional_claim(claims, "org_id"),
     }
 }
 
@@ -194,17 +271,22 @@ fn roles(claims: &Claims) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The layer [`Adapter::require_auth`] returns.
+/// The layer [`Adapter::require_auth`], [`Adapter::require_role`] and
+/// [`Adapter::optional_auth`] return.
 #[derive(Clone)]
 pub struct RequireAuthLayer {
     inner: Arc<Inner>,
     allow_recovery: bool,
+    roles: Arc<[String]>,
+    optional: bool,
 }
 
 impl RequireAuthLayer {
     /// Lets a recovery session through instead of answering 403
     /// `enrollment_required`. The handler can still tell it apart by
-    /// [`User::recovery`].
+    /// [`User::recovery`]. A layer from [`Adapter::optional_auth`] passes a
+    /// recovery session on in the extensions, but `Option<User>` still yields
+    /// `None` for it.
     pub fn allow_recovery(mut self, allow: bool) -> Self {
         self.allow_recovery = allow;
         self
@@ -215,6 +297,8 @@ impl fmt::Debug for RequireAuthLayer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RequireAuthLayer")
             .field("allow_recovery", &self.allow_recovery)
+            .field("roles", &self.roles)
+            .field("optional", &self.optional)
             .finish_non_exhaustive()
     }
 }
@@ -226,6 +310,8 @@ impl<S> Layer<S> for RequireAuthLayer {
         RequireAuth {
             adapter: self.inner.clone(),
             allow_recovery: self.allow_recovery,
+            roles: self.roles.clone(),
+            optional: self.optional,
             service,
         }
     }
@@ -236,6 +322,8 @@ impl<S> Layer<S> for RequireAuthLayer {
 pub struct RequireAuth<S> {
     adapter: Arc<Inner>,
     allow_recovery: bool,
+    roles: Arc<[String]>,
+    optional: bool,
     service: S,
 }
 
@@ -266,29 +354,43 @@ where
         let mut service = std::mem::replace(&mut self.service, clone);
         let adapter = self.adapter.clone();
         let allow_recovery = self.allow_recovery;
+        let roles = self.roles.clone();
+        let optional = self.optional;
 
         Box::pin(async move {
-            match adapter.authenticate(req.headers()).await {
+            let refused = match adapter.authenticate(req.headers()).await {
                 // A cookie session gets the same cross-site check as the auth
                 // routes, or a form on another site could act as the user.
                 Ok((_, true))
                     if check_origin(&adapter.config, req.method(), req.headers()).is_some() =>
                 {
-                    Ok(json_response(
+                    json_response(
                         StatusCode::FORBIDDEN,
                         &json!({ "error": "cross_site_request_blocked" }),
-                    ))
+                    )
                 }
-                Ok((user, _)) if user.recovery && !allow_recovery => Ok(json_response(
+                Ok((user, _)) if user.recovery && !allow_recovery => json_response(
                     StatusCode::FORBIDDEN,
                     &json!({ "error": "enrollment_required" }),
-                )),
+                ),
+                Ok((user, _))
+                    if !roles.is_empty() && !roles.iter().any(|role| user.has_role(role)) =>
+                {
+                    json_response(
+                        StatusCode::FORBIDDEN,
+                        &json!({ "error": "insufficient_role" }),
+                    )
+                }
                 Ok((user, _)) => {
                     req.extensions_mut().insert(user);
-                    service.call(req).await.map(IntoResponse::into_response)
+                    return service.call(req).await.map(IntoResponse::into_response);
                 }
-                Err(rejected) => Ok(rejected.into_response()),
+                Err(rejected) => rejected.into_response(),
+            };
+            if optional {
+                return service.call(req).await.map(IntoResponse::into_response);
             }
+            Ok(refused)
         })
     }
 }

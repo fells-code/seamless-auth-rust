@@ -1235,3 +1235,102 @@ fn debug_output_redacts_credentials() {
         "{printed}"
     );
 }
+
+fn rate_limited() -> Handler {
+    Arc::new(|_| {
+        let mut res = json_reply(429, json!({ "error": "too_many_requests" }));
+        res.headers_mut()
+            .insert("retry-after", HeaderValue::from_static("30"));
+        res
+    })
+}
+
+#[tokio::test]
+async fn upstream_error_replies_keep_retry_after() {
+    let api = FakeApi::start().await;
+    api.on("POST", "/login", rate_limited());
+    api.on("POST", "/refresh", rate_limited());
+    api.on("DELETE", "/logout", rate_limited());
+    let adapter = api.adapter(|b| b);
+
+    let cases = [
+        (
+            "manifest route",
+            call("POST", "/login").body(r#"{"identifier":"a@b.test"}"#),
+        ),
+        (
+            "bearer refresh",
+            call("POST", "/refresh")
+                .header("x-seamless-auth-transport", "bearer")
+                .header("authorization", "Bearer r1"),
+        ),
+        ("logout", call("DELETE", "/logout").cookie(&access())),
+    ];
+    for (name, request) in cases {
+        let r = request.to(&adapter).await;
+        assert_eq!(r.status, 429, "{name}: {}", r.text);
+        assert_eq!(r.headers["retry-after"], "30", "{name}");
+    }
+
+    api.on(
+        "POST",
+        "/login",
+        respond(400, json!({ "error": "invalid_request" })),
+    );
+    let r = call("POST", "/login")
+        .body(r#"{"identifier":"a@b.test"}"#)
+        .to(&adapter)
+        .await;
+    assert_eq!(r.status, 400);
+    assert!(r.headers.get("retry-after").is_none());
+}
+
+#[tokio::test]
+async fn logout_clears_a_pre_auth_cookie_with_its_own_name() {
+    let api = FakeApi::start().await;
+    api.on(
+        "DELETE",
+        "/logout",
+        respond(200, json!({ "message": "ok" })),
+    );
+    let adapter =
+        api.adapter(|b| b.flow_cookie_names("seamless-registration", "seamless-pre-auth"));
+
+    let r = call("DELETE", "/logout")
+        .cookie(&access())
+        .to(&adapter)
+        .await;
+    assert_eq!(r.status, 204);
+    for name in [
+        "seamless-access",
+        "seamless-registration",
+        "seamless-pre-auth",
+        "seamless-refresh",
+    ] {
+        assert!(r.cleared(name), "{name} not cleared");
+    }
+
+    let r = call("DELETE", "/logout").to(&adapter).await;
+    assert_eq!(r.status, 401);
+    assert!(r.cleared("seamless-pre-auth"));
+}
+
+#[tokio::test]
+async fn logout_clears_a_shared_flow_cookie_once() {
+    let api = FakeApi::start().await;
+    api.on(
+        "DELETE",
+        "/logout",
+        respond(200, json!({ "message": "ok" })),
+    );
+    let r = call("DELETE", "/logout")
+        .cookie(&access())
+        .to(&api.adapter(|b| b))
+        .await;
+    assert_eq!(r.status, 204);
+    let headers = r.headers.get_all("set-cookie").iter().filter(|v| {
+        v.to_str()
+            .is_ok_and(|v| v.starts_with("seamless-ephemeral="))
+    });
+    assert_eq!(headers.count(), 1);
+}
