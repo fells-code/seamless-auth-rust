@@ -164,6 +164,10 @@ An OTP code with `purpose` `account_recovery` (`d.is_account_recovery()`) was se
 is recovering the account: word it as a recovery code rather than a sign-in code, so an owner who
 did not ask for it knows something is happening.
 
+An `enrollment_invite_email` carries `sign_in_url`, the `signInUrl` of
+`SendEnrollmentInviteEmailInput` in `@seamless-auth/types`: the sign-in page, which signs nobody
+in on its own.
+
 #### Account notices
 
 The auth API tells an account's owner when something happens to the account, such as a recovery
@@ -185,6 +189,26 @@ adapter cancels it with the token from the notice's cancel link and answers 503
 `recovery_notice_failed`. Without the option the API sends
 notices itself. `cancel_url` (and `text`, which can hold it) is a credential: send it only to `to`
 and never log it.
+
+#### Unsubscribe headers
+
+The adapter hands you what the auth API asked for; your mailer builds and sends the email. So
+custom headers, such as the one-click unsubscribe pair from
+[RFC 8058](https://www.rfc-editor.org/rfc/rfc8058), are set in your own sender, not passed through
+the adapter. Sign-in codes, magic links and enrollment invites are transactional and do not need
+them; mail your application sends on its own, such as release notes, does:
+
+```rust
+let headers = [
+    ("List-Unsubscribe", format!("<https://app.example.com/unsubscribe?t={token}>")),
+    ("List-Unsubscribe-Post", "List-Unsubscribe=One-Click".to_string()),
+];
+mailer.send(&user.email, "What's new", &body, &headers).await?;
+```
+
+The unsubscribe URL must be HTTPS and accept a POST with no further confirmation. Refuse header
+values that contain a CR or LF, and never let a caller set From, To, Cc, Bcc, Subject or
+Content-Type through custom headers, as `@seamless-auth/messaging` does.
 
 ### Magic links
 
