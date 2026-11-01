@@ -293,6 +293,7 @@ fn debug_output_redacts_the_token() {
         phone: None,
         token: "live-access-token".into(),
         recovery: false,
+        organization_id: None,
     };
     assert!(!format!("{user:?}").contains("live-access-token"));
 }
@@ -499,4 +500,356 @@ async fn a_cookie_session_from_a_sibling_subdomain_needs_an_allowlisted_origin()
             .status,
         200
     );
+}
+
+fn bearer(token: &str) -> String {
+    format!("Bearer {token}")
+}
+
+#[tokio::test]
+async fn require_role() {
+    let api = FakeApi::start().await;
+    let adapter = api.adapter(|b| b);
+    let token = |extra: Value| {
+        let mut claims = json!({ "sub": "u1", "typ": "access", "iss": api.url, "aud": api.url });
+        for (k, v) in extra.as_object().unwrap() {
+            claims[k] = v.clone();
+        }
+        sign_rs256(claims)
+    };
+    let router = |roles: &[&str], allow_recovery: bool| {
+        Router::new().route(
+            "/api/orders",
+            get(|user: User| async move { user.id }).route_layer(
+                adapter
+                    .require_role(roles.iter().copied())
+                    .unwrap()
+                    .allow_recovery(allow_recovery),
+            ),
+        )
+    };
+
+    let cases: Vec<(&str, &[&str], Call, u16, &str)> = vec![
+        (
+            "no credential",
+            &["admin"],
+            call("GET", "/api/orders"),
+            401,
+            "unauthenticated",
+        ),
+        (
+            "ephemeral token",
+            &["admin"],
+            call("GET", "/api/orders").header(
+                "authorization",
+                &bearer(&token(json!({ "typ": "ephemeral", "roles": ["admin"] }))),
+            ),
+            401,
+            "unauthenticated",
+        ),
+        (
+            "granted",
+            &["admin"],
+            call("GET", "/api/orders").header(
+                "authorization",
+                &bearer(&token(json!({ "roles": ["admin"] }))),
+            ),
+            200,
+            "",
+        ),
+        (
+            "not granted",
+            &["admin"],
+            call("GET", "/api/orders").header(
+                "authorization",
+                &bearer(&token(json!({ "roles": ["user"] }))),
+            ),
+            403,
+            "insufficient_role",
+        ),
+        (
+            "no roles at all",
+            &["admin"],
+            call("GET", "/api/orders").header("authorization", &bearer(&token(json!({})))),
+            403,
+            "insufficient_role",
+        ),
+        (
+            "any one listed role",
+            &["admin", "orders:read"],
+            call("GET", "/api/orders").header(
+                "authorization",
+                &bearer(&token(json!({ "roles": ["orders:write"] }))),
+            ),
+            200,
+            "",
+        ),
+        (
+            "wildcard scope",
+            &["orders:refund"],
+            call("GET", "/api/orders").header(
+                "authorization",
+                &bearer(&token(json!({ "roles": ["orders:*"] }))),
+            ),
+            200,
+            "",
+        ),
+        (
+            "a scoped role does not grant its parent",
+            &["orders"],
+            call("GET", "/api/orders").header(
+                "authorization",
+                &bearer(&token(json!({ "roles": ["orders:write"] }))),
+            ),
+            403,
+            "insufficient_role",
+        ),
+        (
+            "cookie roles are not trusted over the token",
+            &["admin"],
+            call("GET", "/api/orders").cookie(&access_cookie(
+                "u1",
+                &token(json!({ "roles": ["user"] })),
+                json!(["admin"]),
+            )),
+            403,
+            "insufficient_role",
+        ),
+        (
+            "cookie session with the role",
+            &["admin"],
+            call("GET", "/api/orders").cookie(&access_cookie(
+                "u1",
+                &token(json!({ "roles": ["admin"] })),
+                json!([]),
+            )),
+            200,
+            "",
+        ),
+        (
+            "recovery session",
+            &["admin"],
+            call("GET", "/api/orders").header(
+                "authorization",
+                &bearer(&token(json!({ "roles": ["admin"], "recovery": true }))),
+            ),
+            403,
+            "enrollment_required",
+        ),
+    ];
+
+    for (name, roles, request, status, error) in cases {
+        let r = request.through(router(roles, false)).await;
+        assert_eq!(r.status, status, "{name}: {}", r.text);
+        if status == 200 {
+            assert_eq!(r.text, "u1", "{name}");
+        } else {
+            assert_eq!(r.body, json!({ "error": error }), "{name}");
+        }
+    }
+
+    let recovery = token(json!({ "roles": ["admin"], "recovery": true }));
+    let r = call("GET", "/api/orders")
+        .header("authorization", &bearer(&recovery))
+        .through(router(&["admin"], true))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text);
+    let recovery = token(json!({ "roles": ["user"], "recovery": true }));
+    let r = call("GET", "/api/orders")
+        .header("authorization", &bearer(&recovery))
+        .through(router(&["admin"], true))
+        .await;
+    assert_eq!(r.body, json!({ "error": "insufficient_role" }));
+
+    let cookie = access_cookie("u1", &token(json!({ "roles": ["admin"] })), json!([]));
+    let posting = Router::new().route(
+        "/api/orders",
+        axum::routing::post(|user: User| async move { user.id })
+            .route_layer(adapter.require_role(["admin"]).unwrap()),
+    );
+    let r = call("POST", "/api/orders")
+        .cookie(&cookie)
+        .header("sec-fetch-site", "cross-site")
+        .through(posting)
+        .await;
+    assert_eq!(r.status, 403);
+    assert_eq!(r.body, json!({ "error": "cross_site_request_blocked" }));
+}
+
+#[tokio::test]
+async fn require_role_refuses_an_empty_guard() {
+    let api = FakeApi::start().await;
+    let adapter = api.adapter(|b| b);
+    assert_eq!(
+        adapter.require_role(Vec::<String>::new()).unwrap_err(),
+        crate::BuildError::EmptyGuard
+    );
+    assert!(adapter.require_role([""]).is_err());
+    assert!(adapter.require_role(["admin", "  "]).is_err());
+    assert!(adapter.require_role(["admin"]).is_ok());
+}
+
+#[test]
+fn has_role_matches_scoped_roles() {
+    let user = User {
+        id: "u1".into(),
+        roles: vec!["orders:write".into(), "billing".into()],
+        email: None,
+        phone: None,
+        token: "t".into(),
+        recovery: false,
+        organization_id: None,
+    };
+    for (role, granted) in [
+        ("orders:write", true),
+        ("orders:read", true),
+        ("orders", false),
+        ("billing", true),
+        ("billing:invoices", true),
+        ("admin", false),
+        ("", false),
+    ] {
+        assert_eq!(user.has_role(role), granted, "{role}");
+    }
+}
+
+#[tokio::test]
+async fn the_organization_comes_from_the_verified_token() {
+    let api = FakeApi::start().await;
+    let adapter = api.adapter(|b| b);
+    let with_org = sign_rs256(
+        json!({ "sub": "u1", "typ": "access", "iss": api.url, "aud": api.url, "org_id": "org-1" }),
+    );
+    let without_org = api.token("u1", "access");
+    let org = |user: User| async move { Json(json!({ "org": user.organization_id })) };
+    let router = || Router::new().route("/api/org", get(org).route_layer(adapter.require_auth()));
+
+    let cases = [
+        (
+            "bearer",
+            call("GET", "/api/org").header("authorization", &bearer(&with_org)),
+            json!("org-1"),
+        ),
+        (
+            "bearer without an organization",
+            call("GET", "/api/org").header("authorization", &bearer(&without_org)),
+            Value::Null,
+        ),
+        (
+            "cookie",
+            call("GET", "/api/org").cookie(&signed_cookie(
+                "seamless-access",
+                json!({ "sub": "u1", "token": with_org, "organizationId": "forged", "org_id": "forged" }),
+            )),
+            json!("org-1"),
+        ),
+        (
+            "cookie claims without a token claim",
+            call("GET", "/api/org").cookie(&signed_cookie(
+                "seamless-access",
+                json!({ "sub": "u1", "token": without_org, "organizationId": "forged", "org_id": "forged" }),
+            )),
+            Value::Null,
+        ),
+    ];
+    for (name, request, org) in cases {
+        let r = request.through(router()).await;
+        assert_eq!(r.status, 200, "{name}: {}", r.text);
+        assert_eq!(r.body["org"], org, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn the_optional_user_extractor() {
+    let api = FakeApi::start().await;
+    let adapter = api.adapter(|b| b);
+    let recovery = sign_rs256(
+        json!({ "sub": "u1", "typ": "access", "iss": api.url, "aud": api.url, "recovery": true }),
+    );
+    let access = api.token("u1", "access");
+    let whoami = |user: Option<User>| async move { Json(json!({ "id": user.map(|u| u.id) })) };
+    let optional = || {
+        Router::new().route(
+            "/api/whoami",
+            get(whoami)
+                .post(whoami)
+                .route_layer(adapter.optional_auth()),
+        )
+    };
+
+    let cases = [
+        ("no credential", call("GET", "/api/whoami"), Value::Null),
+        (
+            "access token",
+            call("GET", "/api/whoami").header("authorization", &bearer(&access)),
+            json!("u1"),
+        ),
+        (
+            "cookie session",
+            call("GET", "/api/whoami").cookie(&signed_cookie(
+                "seamless-access",
+                json!({ "sub": "u1", "token": access }),
+            )),
+            json!("u1"),
+        ),
+        (
+            "ephemeral token",
+            call("GET", "/api/whoami")
+                .header("authorization", &bearer(&api.token("u1", "ephemeral"))),
+            Value::Null,
+        ),
+        (
+            "forged cookie",
+            call("GET", "/api/whoami").cookie("seamless-access=a.b.c"),
+            Value::Null,
+        ),
+        (
+            "recovery session",
+            call("GET", "/api/whoami").header("authorization", &bearer(&recovery)),
+            Value::Null,
+        ),
+        (
+            "cross-site cookie request",
+            call("POST", "/api/whoami")
+                .cookie(&signed_cookie(
+                    "seamless-access",
+                    json!({ "sub": "u1", "token": access }),
+                ))
+                .header("sec-fetch-site", "cross-site"),
+            Value::Null,
+        ),
+    ];
+    for (name, request, id) in cases {
+        let r = request.through(optional()).await;
+        assert_eq!(r.status, 200, "{name}: {}", r.text);
+        assert_eq!(r.body["id"], id, "{name}");
+    }
+
+    let unguarded = Router::new().route("/api/whoami", get(whoami));
+    let r = call("GET", "/api/whoami")
+        .header("authorization", &bearer(&access))
+        .through(unguarded)
+        .await;
+    assert_eq!(r.body["id"], Value::Null);
+
+    let allowing = Router::new().route(
+        "/api/whoami",
+        get(whoami).route_layer(adapter.require_auth().allow_recovery(true)),
+    );
+    let r = call("GET", "/api/whoami")
+        .header("authorization", &bearer(&recovery))
+        .through(allowing)
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body["id"], Value::Null);
+
+    let guarded = Router::new().route(
+        "/api/whoami",
+        get(whoami).route_layer(adapter.require_auth()),
+    );
+    let r = call("GET", "/api/whoami")
+        .header("authorization", &bearer(&access))
+        .through(guarded)
+        .await;
+    assert_eq!(r.body["id"], "u1");
 }
