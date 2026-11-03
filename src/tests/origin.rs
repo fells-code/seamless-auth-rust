@@ -230,3 +230,27 @@ async fn a_null_origin_is_refused_on_same_site_requests_without_an_allowlist() {
     assert_eq!(r.body, json!({ "error": "cross_site_request_blocked" }));
     assert!(api.calls_to("POST", "/recovery-codes").is_empty());
 }
+
+#[tokio::test]
+async fn a_null_origin_is_refused_first_whatever_the_fetch_metadata() {
+    let api = started().await;
+    let open = api.adapter(|b| b);
+    let listed = api.adapter(|b| b.allowed_origins(["https://app.example.com"]));
+
+    for adapter in [&open, &listed] {
+        for site in [Some("same-origin"), Some("none"), Some("same-site"), None] {
+            for origin in ["null", "NULL", " Null "] {
+                let mut request = form_post()
+                    .header("origin", origin)
+                    .header("content-type", "application/json");
+                if let Some(site) = site {
+                    request = request.header("sec-fetch-site", site);
+                }
+                let r = request.to(adapter).await;
+                assert_eq!(r.status, 403, "{site:?} {origin:?}: {}", r.text);
+                assert_eq!(r.body, json!({ "error": "cross_site_request_blocked" }));
+            }
+        }
+    }
+    assert!(api.calls_to("POST", "/recovery-codes").is_empty());
+}
