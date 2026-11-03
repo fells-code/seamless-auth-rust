@@ -115,19 +115,51 @@ impl TrustedProxies {
             .collect();
 
         for hop in hops.iter().rev() {
-            match hop.parse::<IpAddr>() {
-                Ok(ip) if self.trusted(ip) => continue,
-                Ok(ip) => return Some(ip),
+            match hop_address(hop) {
+                Some(ip) if self.trusted(ip) => continue,
+                Some(ip) => return Some(ip),
                 // Not an address, so not a trusted proxy either: whoever wrote it
                 // is the client, and it has no usable address.
-                Err(_) => return None,
+                None => return None,
             }
         }
         match hops.first() {
-            Some(first) => first.parse().ok(),
+            Some(first) => hop_address(first),
             None => Some(peer),
         }
     }
+}
+
+/// A hop's address, read past the port some proxies append (`ip:port`,
+/// `[v6]:port`) and the brackets around a bare `[v6]`.
+fn hop_address(hop: &str) -> Option<IpAddr> {
+    if let Ok(ip) = hop.parse() {
+        return Some(ip);
+    }
+    let (host, port) = match hop.strip_prefix('[') {
+        Some(rest) => {
+            let (host, after) = rest.split_once(']')?;
+            match after {
+                "" => (host, None),
+                _ => (host, Some(after.strip_prefix(':')?)),
+            }
+        }
+        None => {
+            let (host, port) = hop.split_once(':')?;
+            // More than one colon without brackets is an IPv6 address, which
+            // already failed to parse above.
+            if port.contains(':') {
+                return None;
+            }
+            (host, Some(port))
+        }
+    };
+    if let Some(port) = port
+        && port.parse::<u16>().is_err()
+    {
+        return None;
+    }
+    host.parse().ok()
 }
 
 fn width(addr: IpAddr) -> u8 {

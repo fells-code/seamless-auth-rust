@@ -101,4 +101,17 @@ fn reads_hops_written_with_a_port() {
         proxies.resolve(&forwarded(&["10.0.0.5:80, 10.0.0.6"]), ip("10.0.0.1")),
         ip("10.0.0.5")
     );
+    // A port that is not one leaves the hop unreadable.
+    for bad in [
+        "203.0.113.50:",
+        "203.0.113.50:http",
+        "[2001:db9::7]x",
+        "[2001:db9::7]:99999",
+    ] {
+        assert_eq!(
+            proxies.resolve(&forwarded(&[bad]), ip("10.0.0.1")),
+            None,
+            "{bad}"
+        );
+    }
 }

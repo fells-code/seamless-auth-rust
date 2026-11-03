@@ -335,7 +335,8 @@ impl Inner {
                         route.method,
                         route.path
                     );
-                    return Reply::error(StatusCode::BAD_GATEWAY, "invalid_upstream_session");
+                    return Reply::error(StatusCode::BAD_GATEWAY, "invalid_upstream_session")
+                        .with_set(std::mem::take(&mut reply.set));
                 }
             };
 
@@ -351,7 +352,8 @@ impl Inner {
                     Ok(cookies) => reply.set.extend(cookies),
                     Err(err) => {
                         tracing::warn!("[seamless-auth] {} {}: {err}", route.method, route.path);
-                        return Reply::error(StatusCode::BAD_GATEWAY, "invalid_upstream_session");
+                        return Reply::error(StatusCode::BAD_GATEWAY, "invalid_upstream_session")
+                            .with_set(std::mem::take(&mut reply.set));
                     }
                 }
             }
