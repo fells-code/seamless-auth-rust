@@ -213,3 +213,20 @@ async fn other_body_less_auth_routes_get_the_content_type_gate() {
         assert_eq!(r.body, json!({ "error": "unsupported_media_type" }));
     }
 }
+
+#[tokio::test]
+async fn a_null_origin_is_refused_on_same_site_requests_without_an_allowlist() {
+    let api = started().await;
+    let adapter = api.adapter(|b| b);
+
+    let r = form_post()
+        .header("sec-fetch-site", "same-site")
+        .header("origin", "null")
+        .header("content-type", "application/json")
+        .to(&adapter)
+        .await;
+
+    assert_eq!(r.status, 403, "{}", r.text);
+    assert_eq!(r.body, json!({ "error": "cross_site_request_blocked" }));
+    assert!(api.calls_to("POST", "/recovery-codes").is_empty());
+}
