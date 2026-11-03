@@ -341,28 +341,6 @@ async fn post_refresh_rotates_both_cookies_and_returns_no_tokens() {
 }
 
 #[tokio::test]
-async fn bearer_refresh_is_shared_for_one_refresh_token() {
-    let api = FakeApi::start().await;
-    api.on("POST", "/refresh", respond(200, api.session("u1")));
-    let adapter = api.adapter(|b| b);
-    let refresh = || {
-        call("POST", "/refresh")
-            .header("x-seamless-auth-transport", "bearer")
-            .header("authorization", "Bearer r1")
-            .to(&adapter)
-    };
-
-    let first = refresh().await;
-    let second = refresh().await;
-
-    assert_eq!(first.status, 200);
-    assert_eq!(first.body["refreshToken"], "refresh-u1");
-    assert_eq!(second.body, first.body);
-    assert_eq!(api.calls_to("POST", "/refresh").len(), 1);
-    assert!(first.cookies.is_empty());
-}
-
-#[tokio::test]
 async fn bearer_refresh_without_a_token_is_401() {
     let api = FakeApi::start().await;
     let r = call("POST", "/refresh")

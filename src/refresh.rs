@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
@@ -13,10 +13,6 @@ use crate::cookies::{CookieWrite, KIND_REFRESH, raw_cookie, read_cookie, session
 use crate::jwt::{Claims, str_claim};
 use crate::routes::{carries_session, cookie_transport_body};
 
-/// A refresh token presented again within this window gets the rotation it
-/// already got, so parallel requests from several tabs with one expired session
-/// all succeed instead of tripping the auth API's reuse detection.
-const REUSE_WINDOW: Duration = Duration::from_secs(5);
 const FLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
@@ -34,7 +30,6 @@ pub(crate) enum RefreshOutcome {
 struct Flight {
     id: u64,
     rx: watch::Receiver<Option<RefreshOutcome>>,
-    finished: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -44,9 +39,11 @@ pub(crate) struct Refresher {
 }
 
 impl Refresher {
-    /// Runs `rotation` once per key at a time, and hands a successful outcome to
-    /// every caller with the same key for the reuse window afterwards. A failure
-    /// is not kept, so each later caller sees it from the auth API itself.
+    /// Runs `rotation` once per key at a time, and hands its outcome to every
+    /// caller that presents the same key while it is in flight, so parallel
+    /// requests from several tabs with one expired session all succeed instead of
+    /// tripping the auth API's reuse detection. Nothing is kept once it settles: a
+    /// later caller is sent to the auth API, which sees a replayed token as reuse.
     ///
     /// The rotation runs on its own task: a caller that goes away mid-flight must
     /// not drop a rotation the auth API has already made, or every other tab would
@@ -61,13 +58,6 @@ impl Refresher {
     {
         let mut rx = {
             let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
-            let now = Instant::now();
-            flights.retain(|_, flight| {
-                flight
-                    .finished
-                    .is_none_or(|at| now.duration_since(at) <= REUSE_WINDOW)
-            });
-
             match flights.get(&key) {
                 Some(flight) => flight.rx.clone(),
                 None => {
@@ -77,14 +67,7 @@ impl Refresher {
                         *next
                     };
                     let (tx, rx) = watch::channel(None);
-                    flights.insert(
-                        key.clone(),
-                        Flight {
-                            id,
-                            rx: rx.clone(),
-                            finished: None,
-                        },
-                    );
+                    flights.insert(key.clone(), Flight { id, rx: rx.clone() });
 
                     let this = self.clone();
                     let rotation = rotation();
@@ -95,11 +78,7 @@ impl Refresher {
                         let outcome = tokio::time::timeout(FLIGHT_TIMEOUT, rotation)
                             .await
                             .unwrap_or_else(|_| RefreshOutcome::Failed("refresh timed out".into()));
-                        this.settle(
-                            &flight_key,
-                            id,
-                            matches!(outcome, RefreshOutcome::Session(_)),
-                        );
+                        this.settle(&flight_key, id);
                         let _ = tx.send(Some(outcome));
                     });
                     rx
@@ -107,14 +86,13 @@ impl Refresher {
             }
         };
 
-        match rx.wait_for(Option::is_some).await {
-            Ok(outcome) => outcome
-                .clone()
-                .unwrap_or_else(|| RefreshOutcome::Failed("refresh lost".into())),
+        let settled = rx.wait_for(Option::is_some).await.map(|o| o.clone());
+        match settled {
+            Ok(outcome) => outcome.unwrap_or_else(|| RefreshOutcome::Failed("refresh lost".into())),
             // The rotation task ended without an answer (it panicked).
             Err(_) => {
                 let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
-                if flights.get(&key).is_some_and(|f| f.finished.is_none()) {
+                if flights.get(&key).is_some_and(|f| f.rx.same_channel(&rx)) {
                     flights.remove(&key);
                 }
                 RefreshOutcome::Failed("refresh task ended".into())
@@ -122,16 +100,10 @@ impl Refresher {
         }
     }
 
-    fn settle(&self, key: &str, id: u64, succeeded: bool) {
+    fn settle(&self, key: &str, id: u64) {
         let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
         if flights.get(key).is_some_and(|f| f.id == id) {
-            if succeeded {
-                if let Some(flight) = flights.get_mut(key) {
-                    flight.finished = Some(Instant::now());
-                }
-            } else {
-                flights.remove(key);
-            }
+            flights.remove(key);
         }
     }
 }
