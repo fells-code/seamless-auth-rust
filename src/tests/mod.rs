@@ -7,6 +7,7 @@ mod guard;
 mod magic_link;
 mod manifest;
 mod notices;
+mod origin;
 mod recovery;
 mod verifier;
 
