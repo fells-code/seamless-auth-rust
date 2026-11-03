@@ -10,6 +10,7 @@ mod manifest;
 mod notices;
 mod origin;
 mod recovery;
+mod refresh;
 mod verifier;
 
 use std::collections::HashMap;
