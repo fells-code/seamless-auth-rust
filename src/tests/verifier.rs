@@ -53,12 +53,23 @@ fn guard_for(verifier: &Verifier, guard: &Value) -> Option<TokenGuardLayer> {
 }
 
 fn protected(verifier: &Verifier, guard: Option<TokenGuardLayer>) -> Router {
+    protected_with(verifier, guard, true)
+}
+
+fn protected_with(
+    verifier: &Verifier,
+    guard: Option<TokenGuardLayer>,
+    allow_clients: bool,
+) -> Router {
     let route = get(|user: TokenUser| async move { Json(json!({ "sub": user.sub })) });
     let route = match guard {
         Some(guard) => route.route_layer(guard),
         None => route,
     };
-    Router::new().route("/resource", route.route_layer(verifier.require_auth()))
+    Router::new().route(
+        "/resource",
+        route.route_layer(verifier.require_auth().allow_clients(allow_clients)),
+    )
 }
 
 async fn send(app: Router, authorization: Option<&str>) -> (u16, Option<String>, Value) {
@@ -119,6 +130,11 @@ async fn verify_vectors() {
         if case["valid"].as_bool().unwrap() {
             let user = result.unwrap_or_else(|e| panic!("{name}: rejected ({e})"));
             assert_eq!(user_fields(&user), case["user"], "{name}");
+            assert_eq!(
+                user.is_client,
+                case["is_client"].as_bool().unwrap(),
+                "{name}"
+            );
         } else {
             assert_eq!(result, Err(crate::TokenError::InvalidToken), "{name}");
         }
@@ -127,13 +143,27 @@ async fn verify_vectors() {
 
 #[tokio::test]
 async fn request_vectors() {
+    run_request_vectors("requests").await;
+}
+
+#[tokio::test]
+async fn user_required_request_vectors() {
+    run_request_vectors("user_required_requests").await;
+}
+
+async fn run_request_vectors(list: &str) {
     let v = vectors();
     let (_api, verifier) = vector_verifier(&v).await;
-    let cases = v["requests"].as_array().unwrap();
+    let cases = v[list].as_array().unwrap();
     assert!(!cases.is_empty());
     for case in cases {
         let name = case["name"].as_str().unwrap();
-        let app = protected(&verifier, guard_for(&verifier, &case["guard"]));
+        let allow_clients = case["auth"]["allow_clients"].as_bool().unwrap_or(true);
+        let app = protected_with(
+            &verifier,
+            guard_for(&verifier, &case["guard"]),
+            allow_clients,
+        );
         let (status, challenge, body) = send(app, case["authorization"].as_str()).await;
         let expect = &case["expect"];
         assert_eq!(status, expect["status"].as_u64().unwrap() as u16, "{name}");
