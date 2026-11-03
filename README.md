@@ -353,13 +353,25 @@ A token is accepted only when it is RS256 under a published signing key (`kid` r
 `use` and `alg` when present must be `sig` and `RS256`), with header `typ` `at+jwt`, no `crit`,
 `iss` equal to the issuer, `aud` naming the audience, in date (5 seconds of clock skew), and with
 `sub` and `client_id`. A first-party session token (one with a `typ` claim) is refused.
-`TokenUser` carries `sub`, `client_id`, `scopes`, `roles`, `sid`, `org_id`, `acr`, `amr` and
-`auth_time`. A client-credentials token has no user claims, so it passes scope guards only.
+`TokenUser` carries `sub`, `client_id`, `scopes`, `roles`, `sid`, `org_id`, `acr`, `amr`,
+`auth_time` and `is_client`. `is_client` is true for a client-credentials token (`sub` equal to
+`client_id`): a machine acting for itself, whose `sub` is a client id rather than a user id. Such a
+token has no user claims, so it passes scope guards only.
+
+A route that must act for a user can refuse client-credentials tokens outright with
+`require_auth().allow_clients(false)` (the default is `true`). The token is still verified first, so
+a missing or invalid token answers 401 as usual, and the scope, role and step-up guards behind it
+run only for a user's token:
+
+```rust
+get(my_orders).route_layer(verifier.require_auth().allow_clients(false))
+```
 
 | Outcome | Status | `WWW-Authenticate` | Body |
 | --- | --- | --- | --- |
 | No bearer token | 401 | `Bearer` | `{"error":"missing_token"}` |
 | Token refused | 401 | `Bearer error="invalid_token"` | `{"error":"invalid_token"}` |
+| `allow_clients(false)`: client-credentials token | 403 | none | `{"error":"user_required"}` |
 | `require_scope`: not every scope granted | 403 | `Bearer error="insufficient_scope", scope="..."` | `{"error":"insufficient_scope","scope":"..."}` |
 | `require_role`: no listed role granted | 403 | none | `{"error":"insufficient_role"}` |
 | `require_step_up`: not met | 401 | `Bearer error="insufficient_user_authentication", ...` (RFC 9470) | `{"error":"insufficient_user_authentication",...}` |
