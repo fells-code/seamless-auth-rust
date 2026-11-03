@@ -143,7 +143,11 @@ cross-site form can post a `text/plain` body shaped like JSON with no CORS prefl
 JSON it would be a sign-in the user never made. A state-changing request with no body (`POST`,
 `PUT`, `PATCH` or `DELETE`) to a manifest route must still send `Content-Type: application/json` or the
 `x-seamless-auth-transport` header, or it answers 415 too: either one forces a CORS preflight,
-which an HTML form on another site, sibling subdomains included, cannot send.
+which an HTML form on another site, sibling subdomains included, cannot send. The header may
+carry any value; only `bearer` selects bearer transport. `POST /refresh`, `DELETE /logout` and
+`DELETE /logout/all` are exempt from this rule, since the client SDKs send them with no body and no
+header, but they still get the cross-site check. Routes behind `require_auth` get the cross-site
+check only.
 
 ### Errors and logout
 
