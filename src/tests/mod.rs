@@ -4,6 +4,7 @@ mod adapter;
 mod client_ip;
 mod console;
 mod guard;
+mod jwks;
 mod magic_link;
 mod manifest;
 mod notices;

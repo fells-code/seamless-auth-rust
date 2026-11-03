@@ -114,6 +114,14 @@ impl JwksCache {
             .ok_or_else(|| format!("unknown key id {kid:?}"))
     }
 
+    /// Makes the last fetch attempt look older than the refetch interval, so the
+    /// next unknown kid fetches again.
+    #[cfg(test)]
+    pub(crate) async fn backdate_attempt(&self) {
+        let mut state = self.state.lock().await;
+        state.attempted_at = Instant::now().checked_sub(REFETCH_INTERVAL + Duration::from_secs(1));
+    }
+
     async fn fetch(&self) -> Result<HashMap<String, Key>, String> {
         let res = self
             .client
