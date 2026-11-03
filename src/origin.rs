@@ -25,6 +25,9 @@ pub(crate) fn check_origin(config: &Config, method: &Method, headers: &HeaderMap
         if !site.eq_ignore_ascii_case(b"same-site") {
             return None;
         }
+        if headers.get("origin").is_some_and(|origin| origin == "null") {
+            return blocked();
+        }
         let Some(allowed) = &config.allowed_origins else {
             return None;
         };

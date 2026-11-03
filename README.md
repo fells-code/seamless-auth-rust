@@ -93,7 +93,7 @@ applies whatever the cookies' `SameSite` setting (a sibling subdomain is same-si
 - `Sec-Fetch-Site: cross-site` is refused, and `same-origin` (or `none`) passes.
 - `Sec-Fetch-Site: same-site` also covers a sibling subdomain, so when `allowed_origins` is set
   the `Origin` must be on it, and a request with no `Origin` is refused. Without
-  `allowed_origins` it passes.
+  `allowed_origins` it passes, unless its `Origin` is `null`.
 - With no `Sec-Fetch-Site` (an older browser or a server), a request with no `Origin` passes, a
   `null` `Origin` is refused, and when `allowed_origins` is set the `Origin` must be on it.
 - An empty `allowed_origins` is still set: it allows no cross-origin caller.
