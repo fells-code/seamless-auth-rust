@@ -90,12 +90,14 @@ applies whatever the cookies' `SameSite` setting (a sibling subdomain is same-si
 `Strict` cookies still reach it), and only to state-changing methods (not `GET`, `HEAD` or
 `OPTIONS`); a refused request answers 403 `cross_site_request_blocked`:
 
+- A `null` `Origin` (in any case) is refused first, whatever `Sec-Fetch-Site` and
+  `allowed_origins` say.
 - `Sec-Fetch-Site: cross-site` is refused, and `same-origin` (or `none`) passes.
 - `Sec-Fetch-Site: same-site` also covers a sibling subdomain, so when `allowed_origins` is set
   the `Origin` must be on it, and a request with no `Origin` is refused. Without
-  `allowed_origins` it passes, unless its `Origin` is `null`.
-- With no `Sec-Fetch-Site` (an older browser or a server), a request with no `Origin` passes, a
-  `null` `Origin` is refused, and when `allowed_origins` is set the `Origin` must be on it.
+  `allowed_origins` it passes.
+- With no `Sec-Fetch-Site` (an older browser or a server), a request with no `Origin` passes, and
+  when `allowed_origins` is set the `Origin` must be on it.
 - An empty `allowed_origins` is still set: it allows no cross-origin caller.
 
 A bearer token is never attached by a browser, so it is not checked.

@@ -17,6 +17,15 @@ pub(crate) fn check_origin(config: &Config, method: &Method, headers: &HeaderMap
         ))
     };
 
+    // A null Origin is opaque or sandboxed, never the adopter's own page, so it
+    // is refused whatever Sec-Fetch-Site and the allowlist say.
+    if headers
+        .get("origin")
+        .is_some_and(|origin| origin.as_bytes().trim_ascii().eq_ignore_ascii_case(b"null"))
+    {
+        return blocked();
+    }
+
     if let Some(site) = headers.get("sec-fetch-site") {
         let site = site.as_bytes();
         if site.eq_ignore_ascii_case(b"cross-site") {
@@ -24,9 +33,6 @@ pub(crate) fn check_origin(config: &Config, method: &Method, headers: &HeaderMap
         }
         if !site.eq_ignore_ascii_case(b"same-site") {
             return None;
-        }
-        if headers.get("origin").is_some_and(|origin| origin == "null") {
-            return blocked();
         }
         let Some(allowed) = &config.allowed_origins else {
             return None;
@@ -38,9 +44,6 @@ pub(crate) fn check_origin(config: &Config, method: &Method, headers: &HeaderMap
     }
 
     let origin = headers.get("origin")?;
-    if origin == "null" {
-        return blocked();
-    }
     // An Origin a browser would never send is not one to trust.
     if origin.to_str().is_err() {
         return blocked();
