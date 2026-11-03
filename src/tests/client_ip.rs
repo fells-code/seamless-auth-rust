@@ -72,3 +72,33 @@ fn refuses_what_it_cannot_read() {
     }
     assert!(TrustedProxies::new(["0.0.0.0/0", "::/0"]).is_ok());
 }
+
+#[test]
+fn reads_hops_written_with_a_port() {
+    let proxies = TrustedProxies::new(["10.0.0.0/8", "2001:db8::/32"]).unwrap();
+
+    assert_eq!(
+        proxies.resolve(&forwarded(&["203.0.113.50, 10.0.0.7:443"]), ip("10.0.0.1")),
+        ip("203.0.113.50")
+    );
+    assert_eq!(
+        proxies.resolve(&forwarded(&["203.0.113.50:51234"]), ip("10.0.0.1")),
+        ip("203.0.113.50")
+    );
+    assert_eq!(
+        proxies.resolve(
+            &forwarded(&["[2001:db9::7]:51234, [2001:db8::5]:443"]),
+            ip("2001:db8::2")
+        ),
+        ip("2001:db9::7")
+    );
+    assert_eq!(
+        proxies.resolve(&forwarded(&["[2001:db9::7]"]), ip("2001:db8::2")),
+        ip("2001:db9::7")
+    );
+    // Every hop trusted, the left-most written with a port.
+    assert_eq!(
+        proxies.resolve(&forwarded(&["10.0.0.5:80, 10.0.0.6"]), ip("10.0.0.1")),
+        ip("10.0.0.5")
+    );
+}

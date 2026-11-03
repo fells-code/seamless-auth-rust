@@ -1315,3 +1315,54 @@ async fn logout_clears_a_shared_flow_cookie_once() {
     });
     assert_eq!(headers.count(), 1);
 }
+
+async fn switch_after_a_silent_refresh(upstream: impl FnOnce(&FakeApi) -> Value) -> Reply {
+    let api = FakeApi::start().await;
+    api.on("POST", "/refresh", respond(200, api.session("u1")));
+    api.on(
+        "POST",
+        "/organizations/o2/switch",
+        respond(200, upstream(&api)),
+    );
+    let refresh = signed_cookie(
+        "seamless-refresh",
+        json!({ "sub": "u1", "refreshToken": "r1" }),
+    );
+    call("POST", "/organizations/o2/switch")
+        .cookie(&refresh)
+        .body("{}")
+        .to(&api.adapter(|b| b))
+        .await
+}
+
+#[tokio::test]
+async fn an_unverifiable_upstream_session_keeps_the_rotated_cookies() {
+    let r = switch_after_a_silent_refresh(|_| {
+        json!({
+            "sub": "u1",
+            "token": "not-a-jwt",
+            "ttl": 900,
+        })
+    })
+    .await;
+    assert_eq!(r.status, 502, "{}", r.text);
+    assert_eq!(r.body["error"], "invalid_upstream_session");
+    for name in ["seamless-access", "seamless-refresh"] {
+        assert!(r.cookies.contains_key(name), "rotated {name} dropped");
+    }
+}
+
+#[tokio::test]
+async fn an_unstorable_upstream_session_keeps_the_rotated_cookies() {
+    let r = switch_after_a_silent_refresh(|api| {
+        let mut session = api.session("u1");
+        session["ttl"] = json!("never");
+        session
+    })
+    .await;
+    assert_eq!(r.status, 502, "{}", r.text);
+    assert_eq!(r.body["error"], "invalid_upstream_session");
+    for name in ["seamless-access", "seamless-refresh"] {
+        assert!(r.cookies.contains_key(name), "rotated {name} dropped");
+    }
+}
