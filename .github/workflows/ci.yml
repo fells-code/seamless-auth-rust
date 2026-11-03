@@ -89,6 +89,9 @@ jobs:
       - name: Conformance
         env:
           SEAMLESS_API_DIR: ${{ github.workspace }}/seamless-auth-api
+          # This adapter ships the content-type gate, so hold it to the pending
+          # contract (seamless-cli verify/harness/lib/pendingContracts.ts).
+          SEAMLESS_VERIFY_CONTRACTS: content-type-gate
         run: node seamless-cli/dist/index.js verify --adapter-url=http://localhost:8080
       - name: Reference app log
         if: always()
