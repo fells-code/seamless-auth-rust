@@ -9,8 +9,8 @@ use axum::http::{
 use serde_json::{Map, Value, json};
 
 use crate::adapter::{
-    BodyError, Forwarded, Inner, Reply, UpstreamCall, bearer_token, failure, is_json_content_type,
-    read_json, read_request_body,
+    BodyError, Forwarded, Inner, Reply, TRANSPORT_HEADER, UpstreamCall, bearer_token, failure,
+    is_json_content_type, read_json, read_request_body,
 };
 use crate::cookies::{
     CookieWrite, cookie_kind, ephemeral_cookie, raw_cookie, read_cookie, session_cookies,
@@ -190,8 +190,15 @@ impl Inner {
         };
         // The body goes upstream as JSON, so it has to be JSON. A cross-site form
         // can send a text/plain body shaped like JSON with no CORS preflight; read
-        // as JSON, that would be a sign-in the victim never made.
-        if body.is_some() && !is_explicit_json(parts.headers.get(CONTENT_TYPE)) {
+        // as JSON, that would be a sign-in the victim never made. A body-less
+        // state change needs the JSON type or the transport header all the same:
+        // either forces a preflight, which a form on a sibling subdomain cannot
+        // pass, and a form can send no body at all.
+        let json = is_explicit_json(parts.headers.get(CONTENT_TYPE));
+        let unsafe_method = !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS);
+        if (body.is_some() && !json)
+            || (unsafe_method && !json && !parts.headers.contains_key(TRANSPORT_HEADER))
+        {
             return Reply::error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
         }
 

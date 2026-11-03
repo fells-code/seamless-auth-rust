@@ -283,6 +283,7 @@ async fn an_unknown_delivery_kind_is_skipped() {
         .await;
     assert_eq!(r.status, 200, "{}", r.text);
     let r = call("POST", "/otp/generate-login-email-otp")
+        .header("content-type", "application/json")
         .cookie(&pre_auth())
         .to(&adapter)
         .await;

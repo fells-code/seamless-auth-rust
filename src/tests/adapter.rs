@@ -428,6 +428,7 @@ async fn delivery_routes_hand_the_message_to_the_application() {
     });
 
     let r = call("POST", "/otp/generate-login-email-otp")
+        .header("content-type", "application/json")
         .cookie(&pre_auth())
         .to(&adapter)
         .await;
@@ -505,6 +506,7 @@ async fn a_failed_delivery_is_reported() {
     let adapter = api.adapter(|b| b.deliver(|_| async { Err::<(), _>("smtp down") }));
 
     let r = call("POST", "/magic-link")
+        .header("content-type", "application/json")
         .cookie(&pre_auth())
         .to(&adapter)
         .await;
@@ -523,6 +525,7 @@ async fn without_deliver_the_api_sends_the_message() {
     );
 
     call("POST", "/magic-link")
+        .header("content-type", "application/json")
         .cookie(&pre_auth())
         .to(&api.adapter(|b| b))
         .await;
@@ -755,7 +758,7 @@ async fn the_origin_guard_follows_sec_fetch_site() {
             &lax,
             "POST",
             &[("sec-fetch-site", "cross-site")],
-            false,
+            true,
         ),
         (
             "same-site from a listed Origin",

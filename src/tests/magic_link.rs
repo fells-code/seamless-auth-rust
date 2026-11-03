@@ -108,7 +108,10 @@ async fn confirm_is_proxied_without_a_credential() {
     let confirm = format!("{VERIFY}/confirm");
     api.on("POST", &confirm, respond(200, ok()));
 
-    let r = call("POST", &confirm).to(&api.adapter(|b| b)).await;
+    let r = call("POST", &confirm)
+        .header("content-type", "application/json")
+        .to(&api.adapter(|b| b))
+        .await;
 
     assert_eq!(r.status, 200, "{}", r.text);
     assert_eq!(r.body, ok());

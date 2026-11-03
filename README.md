@@ -86,8 +86,9 @@ state come from that verified token, so a cookie forged with a leaked cookie sec
 claims of its own. When the JWKS cannot be fetched the session is refused.
 
 A request the guard admits on the session cookie also gets the auth routes' cross-site check. It
-applies only while cookies are `SameSite=None`, and only to state-changing methods (not `GET`,
-`HEAD` or `OPTIONS`); a refused request answers 403 `cross_site_request_blocked`:
+applies whatever the cookies' `SameSite` setting (a sibling subdomain is same-site, so `Lax` and
+`Strict` cookies still reach it), and only to state-changing methods (not `GET`, `HEAD` or
+`OPTIONS`); a refused request answers 403 `cross_site_request_blocked`:
 
 - `Sec-Fetch-Site: cross-site` is refused, and `same-origin` (or `none`) passes.
 - `Sec-Fetch-Site: same-site` also covers a sibling subdomain, so when `allowed_origins` is set
@@ -95,6 +96,7 @@ applies only while cookies are `SameSite=None`, and only to state-changing metho
   `allowed_origins` it passes.
 - With no `Sec-Fetch-Site` (an older browser or a server), a request with no `Origin` passes, a
   `null` `Origin` is refused, and when `allowed_origins` is set the `Origin` must be on it.
+- An empty `allowed_origins` is still set: it allows no cross-origin caller.
 
 A bearer token is never attached by a browser, so it is not checked.
 
@@ -138,7 +140,10 @@ get(|user: Option<User>| async move { /* signed in or not */ })
 The auth routes forward a request body to the auth API as JSON, so a body must be sent as
 `application/json` (or a `+json` type). Anything else answers 415 `unsupported_media_type`: a
 cross-site form can post a `text/plain` body shaped like JSON with no CORS preflight, and read as
-JSON it would be a sign-in the user never made. The client SDKs already send JSON.
+JSON it would be a sign-in the user never made. A state-changing request with no body (`POST`,
+`PUT`, `PATCH` or `DELETE`) to a manifest route must still send `Content-Type: application/json` or the
+`x-seamless-auth-transport` header, or it answers 415 too: either one forces a CORS preflight,
+which an HTML form on another site, sibling subdomains included, cannot send.
 
 ### Errors and logout
 
@@ -163,7 +168,7 @@ API cannot be reached.
 | `cookie_domain` | none | Cookie `Domain` |
 | `insecure_cookies` | `false` | Drops `Secure`, for local development over HTTP, and allows example secrets |
 | `same_site` | `None`, or `Lax` with `insecure_cookies` | Cookie `SameSite` |
-| `allowed_origins` | none | The only cross-origin (including same-site) callers allowed to change state while cookies are `SameSite=None` |
+| `allowed_origins` | none | The only cross-origin (including same-site) callers allowed to change state; an empty list allows none |
 | `session_cookie_names` | `seamless-access`, `seamless-refresh` | Session cookie names |
 | `flow_cookie_names` | `seamless-ephemeral` | Sign-in flow cookie names |
 | `deliver` | none | Sends OTP codes and magic links through your own transports |
