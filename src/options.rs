@@ -116,7 +116,7 @@ pub struct Builder {
     cookie_domain: Option<String>,
     insecure_cookies: bool,
     same_site: Option<SameSite>,
-    allowed_origins: Vec<String>,
+    allowed_origins: Option<Vec<String>>,
     access_cookie_name: String,
     registration_cookie_name: String,
     refresh_cookie_name: String,
@@ -149,7 +149,7 @@ impl Builder {
             cookie_domain: None,
             insecure_cookies: false,
             same_site: None,
-            allowed_origins: Vec::new(),
+            allowed_origins: None,
             access_cookie_name: "seamless-access".into(),
             registration_cookie_name: "seamless-ephemeral".into(),
             refresh_cookie_name: "seamless-refresh".into(),
@@ -219,15 +219,16 @@ impl Builder {
         self
     }
 
-    /// The only cross-origin callers allowed to change state while cookies are
-    /// `SameSite=None`. With it set, a `Sec-Fetch-Site: same-site` request (which
-    /// includes a sibling subdomain) needs an `Origin` on the list as well.
+    /// The only cross-origin callers allowed to change state. With it set, a
+    /// `Sec-Fetch-Site: same-site` request (which includes a sibling subdomain),
+    /// or a request without fetch metadata that carries an `Origin`, needs that
+    /// `Origin` on the list. An empty list allows no cross-origin caller.
     pub fn allowed_origins<I, S>(mut self, origins: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.allowed_origins = origins.into_iter().map(Into::into).collect();
+        self.allowed_origins = Some(origins.into_iter().map(Into::into).collect());
         self
     }
 
@@ -438,7 +439,8 @@ pub(crate) struct Config {
     pub cookie_domain: Option<String>,
     pub secure_cookies: bool,
     pub same_site: SameSite,
-    pub allowed_origins: Vec<String>,
+    /// `None` when not configured; an empty list is configured and allows none.
+    pub allowed_origins: Option<Vec<String>>,
     pub access_cookie_name: String,
     pub registration_cookie_name: String,
     pub refresh_cookie_name: String,

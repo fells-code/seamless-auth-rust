@@ -24,7 +24,7 @@ use crate::origin::check_origin;
 use crate::refresh::Refresher;
 use crate::service_token::ServiceTokens;
 
-const TRANSPORT_HEADER: &str = "x-seamless-auth-transport";
+pub(crate) const TRANSPORT_HEADER: &str = "x-seamless-auth-transport";
 pub(crate) const DELIVERY_MODE_HEADER: &str = "x-seamless-auth-delivery-mode";
 pub(crate) const DELIVERY_KINDS_HEADER: &str = "x-seamless-auth-delivery-kinds";
 pub(crate) const MAX_BODY_BYTES: usize = 1 << 20;

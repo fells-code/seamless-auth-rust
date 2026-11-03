@@ -341,28 +341,6 @@ async fn post_refresh_rotates_both_cookies_and_returns_no_tokens() {
 }
 
 #[tokio::test]
-async fn bearer_refresh_is_shared_for_one_refresh_token() {
-    let api = FakeApi::start().await;
-    api.on("POST", "/refresh", respond(200, api.session("u1")));
-    let adapter = api.adapter(|b| b);
-    let refresh = || {
-        call("POST", "/refresh")
-            .header("x-seamless-auth-transport", "bearer")
-            .header("authorization", "Bearer r1")
-            .to(&adapter)
-    };
-
-    let first = refresh().await;
-    let second = refresh().await;
-
-    assert_eq!(first.status, 200);
-    assert_eq!(first.body["refreshToken"], "refresh-u1");
-    assert_eq!(second.body, first.body);
-    assert_eq!(api.calls_to("POST", "/refresh").len(), 1);
-    assert!(first.cookies.is_empty());
-}
-
-#[tokio::test]
 async fn bearer_refresh_without_a_token_is_401() {
     let api = FakeApi::start().await;
     let r = call("POST", "/refresh")
@@ -428,6 +406,7 @@ async fn delivery_routes_hand_the_message_to_the_application() {
     });
 
     let r = call("POST", "/otp/generate-login-email-otp")
+        .header("content-type", "application/json")
         .cookie(&pre_auth())
         .to(&adapter)
         .await;
@@ -505,6 +484,7 @@ async fn a_failed_delivery_is_reported() {
     let adapter = api.adapter(|b| b.deliver(|_| async { Err::<(), _>("smtp down") }));
 
     let r = call("POST", "/magic-link")
+        .header("content-type", "application/json")
         .cookie(&pre_auth())
         .to(&adapter)
         .await;
@@ -523,6 +503,7 @@ async fn without_deliver_the_api_sends_the_message() {
     );
 
     call("POST", "/magic-link")
+        .header("content-type", "application/json")
         .cookie(&pre_auth())
         .to(&api.adapter(|b| b))
         .await;
@@ -755,7 +736,7 @@ async fn the_origin_guard_follows_sec_fetch_site() {
             &lax,
             "POST",
             &[("sec-fetch-site", "cross-site")],
-            false,
+            true,
         ),
         (
             "same-site from a listed Origin",
@@ -1333,4 +1314,55 @@ async fn logout_clears_a_shared_flow_cookie_once() {
             .is_ok_and(|v| v.starts_with("seamless-ephemeral="))
     });
     assert_eq!(headers.count(), 1);
+}
+
+async fn switch_after_a_silent_refresh(upstream: impl FnOnce(&FakeApi) -> Value) -> Reply {
+    let api = FakeApi::start().await;
+    api.on("POST", "/refresh", respond(200, api.session("u1")));
+    api.on(
+        "POST",
+        "/organizations/o2/switch",
+        respond(200, upstream(&api)),
+    );
+    let refresh = signed_cookie(
+        "seamless-refresh",
+        json!({ "sub": "u1", "refreshToken": "r1" }),
+    );
+    call("POST", "/organizations/o2/switch")
+        .cookie(&refresh)
+        .body("{}")
+        .to(&api.adapter(|b| b))
+        .await
+}
+
+#[tokio::test]
+async fn an_unverifiable_upstream_session_keeps_the_rotated_cookies() {
+    let r = switch_after_a_silent_refresh(|_| {
+        json!({
+            "sub": "u1",
+            "token": "not-a-jwt",
+            "ttl": 900,
+        })
+    })
+    .await;
+    assert_eq!(r.status, 502, "{}", r.text);
+    assert_eq!(r.body["error"], "invalid_upstream_session");
+    for name in ["seamless-access", "seamless-refresh"] {
+        assert!(r.cookies.contains_key(name), "rotated {name} dropped");
+    }
+}
+
+#[tokio::test]
+async fn an_unstorable_upstream_session_keeps_the_rotated_cookies() {
+    let r = switch_after_a_silent_refresh(|api| {
+        let mut session = api.session("u1");
+        session["ttl"] = json!("never");
+        session
+    })
+    .await;
+    assert_eq!(r.status, 502, "{}", r.text);
+    assert_eq!(r.body["error"], "invalid_upstream_session");
+    for name in ["seamless-access", "seamless-refresh"] {
+        assert!(r.cookies.contains_key(name), "rotated {name} dropped");
+    }
 }

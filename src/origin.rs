@@ -1,14 +1,11 @@
 use axum::http::{HeaderMap, Method, StatusCode};
 
 use crate::adapter::Reply;
-use crate::options::{Config, SameSite};
+use crate::options::Config;
 
-/// Blocks cross-site state changes while cookies are `SameSite=None`, which is
-/// when the browser would otherwise attach them to such a request.
+/// Blocks cross-site state changes whatever the cookies' `SameSite` setting: a
+/// sibling subdomain is same-site, so `Lax` and `Strict` cookies still reach it.
 pub(crate) fn check_origin(config: &Config, method: &Method, headers: &HeaderMap) -> Option<Reply> {
-    if config.same_site != SameSite::None {
-        return None;
-    }
     if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
         return None;
     }
@@ -20,45 +17,51 @@ pub(crate) fn check_origin(config: &Config, method: &Method, headers: &HeaderMap
         ))
     };
 
+    // A null Origin is opaque or sandboxed, never the adopter's own page, so it
+    // is refused whatever Sec-Fetch-Site and the allowlist say.
+    if headers
+        .get("origin")
+        .is_some_and(|origin| origin.as_bytes().trim_ascii().eq_ignore_ascii_case(b"null"))
+    {
+        return blocked();
+    }
+
     if let Some(site) = headers.get("sec-fetch-site") {
         let site = site.as_bytes();
         if site.eq_ignore_ascii_case(b"cross-site") {
             return blocked();
         }
-        // A sibling subdomain is same-site too, so with an allowlist the Origin
-        // has to be on it.
-        if !site.eq_ignore_ascii_case(b"same-site") || config.allowed_origins.is_empty() {
+        if !site.eq_ignore_ascii_case(b"same-site") {
             return None;
         }
+        let Some(allowed) = &config.allowed_origins else {
+            return None;
+        };
         return match headers.get("origin") {
-            Some(origin) if is_allowed(config, origin.as_bytes()) => None,
+            Some(origin) if is_allowed(allowed, origin.as_bytes()) => None,
             _ => blocked(),
         };
     }
 
     let origin = headers.get("origin")?;
-    if origin == "null" {
-        return blocked();
-    }
     // An Origin a browser would never send is not one to trust.
     if origin.to_str().is_err() {
         return blocked();
     }
-    if config.allowed_origins.is_empty() || is_allowed(config, origin.as_bytes()) {
-        return None;
+    match &config.allowed_origins {
+        Some(allowed) if !is_allowed(allowed, origin.as_bytes()) => blocked(),
+        _ => None,
     }
-    blocked()
 }
 
 /// Whether an Origin is on the allowlist. An Origin, or an allowlist entry, that
 /// does not normalize never matches, so two unparseable values cannot pass for
 /// one another.
-fn is_allowed(config: &Config, origin: &[u8]) -> bool {
+fn is_allowed(allowed: &[String], origin: &[u8]) -> bool {
     let Some(origin) = std::str::from_utf8(origin).ok().and_then(normalize_origin) else {
         return false;
     };
-    config
-        .allowed_origins
+    allowed
         .iter()
         .filter_map(|allowed| normalize_origin(allowed))
         .any(|allowed| allowed == origin)
