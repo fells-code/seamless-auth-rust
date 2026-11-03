@@ -151,6 +151,27 @@ carry any value; only `bearer` selects bearer transport. `POST /refresh`, `DELET
 header, but they still get the cross-site check. Routes behind `require_auth` get the cross-site
 check only.
 
+### Refresh
+
+In cookie transport the auth routes refresh an expired access cookie from the refresh cookie on
+their own, and a browser can also call `POST /auth/refresh`. Parallel requests presenting one
+refresh token share a single rotation, and a request presenting the same refresh cookie within 5
+seconds of a successful rotation gets that rotated session, so several tabs with one expired
+session all succeed. A bearer client presenting a spent refresh token always reaches the auth API.
+
+Only a successful rotation is shared for those 5 seconds, and only a refresh the auth API refuses
+ends a browser session. Both the silent refresh and `POST /auth/refresh` clear the session cookies
+only when the auth API answers the refresh with 401 (the silent refresh answers 401
+`Refresh failed`, `POST /auth/refresh` answers 401 `invalid_refresh_token`) or when the refresh
+cookie cannot be read. Any other failure keeps the cookies, so the next request tries again:
+
+| The refresh | The answer |
+| --- | --- |
+| does not reach the auth API | 502 `upstream_unavailable` |
+| gets another non-2xx answer (a 503 during maintenance, a 429) | that status, body and `Retry-After` |
+| gets a 2xx other than 200, a 200 with no session, or a session that fails verification | 502 `upstream_unavailable` |
+| does not settle within 30 seconds, or its task panics | 502 `upstream_unavailable` |
+
 ### Errors and logout
 
 An error from the auth API goes back with its status, its JSON body and its `Retry-After` header,

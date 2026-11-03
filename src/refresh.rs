@@ -179,7 +179,22 @@ impl Refresher {
 
 pub(crate) enum SilentRefreshError {
     NoRefreshCookie,
-    Failed(String),
+    /// The auth API refused the refresh token with 401, or the refresh cookie
+    /// cannot be read. The session is over, so its cookies are cleared.
+    Rejected(String),
+    /// The refresh failed without saying the session is over: the auth API was
+    /// unreachable or answered another error, or the rotation did not settle on a
+    /// session the adapter can vouch for. The answer to send, with the cookies
+    /// kept so the next request tries again.
+    Transient(Box<Reply>),
+}
+
+fn unavailable(err: &str) -> SilentRefreshError {
+    tracing::debug!("[seamless-auth] Refresh failed: {err}");
+    SilentRefreshError::Transient(Box::new(Reply::error(
+        StatusCode::BAD_GATEWAY,
+        "upstream_unavailable",
+    )))
 }
 
 impl Inner {
@@ -200,7 +215,9 @@ impl Inner {
             .map(|p| str_claim(p, "refreshToken"))
             .unwrap_or("");
         if refresh_token.is_empty() {
-            return Err(SilentRefreshError::Failed("invalid refresh cookie".into()));
+            return Err(SilentRefreshError::Rejected(
+                "invalid refresh cookie".into(),
+            ));
         }
         let subject = payload.as_ref().map(|p| str_claim(p, "sub")).unwrap_or("");
         self.refresh_session(
@@ -226,9 +243,10 @@ impl Inner {
         let mut extra = Claims::new();
         extra.insert("refreshToken".into(), Value::from(refresh_token));
         let Some(service) = self.tokens.sign(subject, extra) else {
-            return Err(SilentRefreshError::Failed(
-                "could not sign the service token".into(),
-            ));
+            return Err(SilentRefreshError::Transient(Box::new(Reply::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+            ))));
         };
 
         let inner = self.clone();
@@ -253,21 +271,38 @@ impl Inner {
 
         let session = match outcome {
             RefreshOutcome::Session(session) => session,
-            RefreshOutcome::Rejected { status, .. } => {
-                return Err(SilentRefreshError::Failed(format!(
+            RefreshOutcome::Rejected { status, .. } if status == StatusCode::UNAUTHORIZED => {
+                return Err(SilentRefreshError::Rejected("refresh answered 401".into()));
+            }
+            RefreshOutcome::Rejected { status, .. } if status.is_success() => {
+                return Err(unavailable(&format!(
                     "refresh answered {}",
                     status.as_u16()
                 )));
             }
-            RefreshOutcome::Failed(err) => return Err(SilentRefreshError::Failed(err)),
+            RefreshOutcome::Rejected {
+                status,
+                body,
+                is_json,
+                retry_after,
+            } => {
+                tracing::debug!(
+                    "[seamless-auth] Refresh failed: refresh answered {}",
+                    status.as_u16()
+                );
+                return Err(SilentRefreshError::Transient(Box::new(
+                    failure(status, body, is_json).with_retry_after(retry_after),
+                )));
+            }
+            RefreshOutcome::Failed(err) => return Err(unavailable(&err)),
         };
 
         let session_id = self
             .verify_session(&session, "access")
             .await
-            .map_err(SilentRefreshError::Failed)?;
+            .map_err(|err| unavailable(&err))?;
         let cookies = session_cookies(&self.config, &session, &session_id, true)
-            .map_err(SilentRefreshError::Failed)?;
+            .map_err(|err| unavailable(&err))?;
         Ok((session, cookies))
     }
 
@@ -356,13 +391,14 @@ impl Inner {
             Err(SilentRefreshError::NoRefreshCookie) => {
                 Reply::error(StatusCode::UNAUTHORIZED, "refresh token required")
             }
-            Err(SilentRefreshError::Failed(err)) => {
+            Err(SilentRefreshError::Rejected(err)) => {
                 tracing::debug!("[seamless-auth] Refresh failed: {err}");
                 Reply::error(StatusCode::UNAUTHORIZED, "invalid_refresh_token").with_clear(vec![
                     self.config.access_cookie_name.clone(),
                     self.config.refresh_cookie_name.clone(),
                 ])
             }
+            Err(SilentRefreshError::Transient(reply)) => *reply,
         }
     }
 

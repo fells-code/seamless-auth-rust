@@ -102,7 +102,8 @@ impl Inner {
                     });
                 }
                 Err(SilentRefreshError::NoRefreshCookie) => {}
-                Err(SilentRefreshError::Failed(err)) => {
+                Err(SilentRefreshError::Transient(reply)) => return Err(reply),
+                Err(SilentRefreshError::Rejected(err)) => {
                     tracing::debug!("[seamless-auth] Silent refresh failed: {err}");
                     return Err(Box::new(
                         Reply::error(StatusCode::UNAUTHORIZED, "Refresh failed").with_clear(vec![
@@ -460,8 +461,14 @@ impl Inner {
                 reply.set.extend(cookies);
             }
             Err(SilentRefreshError::NoRefreshCookie) => {}
-            Err(SilentRefreshError::Failed(err)) => {
+            Err(SilentRefreshError::Rejected(err)) => {
                 tracing::debug!("[seamless-auth] Refresh after recovery enrollment failed: {err}");
+            }
+            Err(SilentRefreshError::Transient(reply)) => {
+                tracing::debug!(
+                    "[seamless-auth] Refresh after recovery enrollment failed: {}",
+                    reply.status.as_u16()
+                );
             }
         }
     }
