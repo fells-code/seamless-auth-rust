@@ -104,9 +104,13 @@ impl Verifier {
     /// A layer that answers 401 unless the request carries a valid bearer token,
     /// and puts the [`TokenUser`] in the request extensions for what is behind
     /// it: the guards below, and the handler.
+    ///
+    /// Client-credentials tokens are accepted unless
+    /// [`allow_clients(false)`](RequireTokenLayer::allow_clients) is set.
     pub fn require_auth(&self) -> RequireTokenLayer {
         RequireTokenLayer {
             verifier: self.clone(),
+            allow_clients: true,
         }
     }
 
@@ -280,6 +284,19 @@ fn step_up_challenge(step_up: &StepUp, level_ok: bool) -> Response {
 #[derive(Clone, Debug)]
 pub struct RequireTokenLayer {
     verifier: Verifier,
+    allow_clients: bool,
+}
+
+impl RequireTokenLayer {
+    /// Whether to accept a client-credentials token ([`TokenUser::is_client`]).
+    /// Defaults to `true`. With `false`, such a token is answered with 403
+    /// `{"error":"user_required"}` ([`TokenError::UserRequired`]) once it
+    /// verifies, so only a token issued to a user reaches the guards and the
+    /// handler behind it.
+    pub fn allow_clients(mut self, allow: bool) -> Self {
+        self.allow_clients = allow;
+        self
+    }
 }
 
 impl<S> Layer<S> for RequireTokenLayer {
@@ -288,6 +305,7 @@ impl<S> Layer<S> for RequireTokenLayer {
     fn layer(&self, service: S) -> Self::Service {
         RequireToken {
             verifier: self.verifier.clone(),
+            allow_clients: self.allow_clients,
             service,
         }
     }
@@ -297,6 +315,7 @@ impl<S> Layer<S> for RequireTokenLayer {
 #[derive(Clone)]
 pub struct RequireToken<S> {
     verifier: Verifier,
+    allow_clients: bool,
     service: S,
 }
 
@@ -326,10 +345,14 @@ where
         let clone = self.service.clone();
         let mut service = std::mem::replace(&mut self.service, clone);
         let verifier = self.verifier.clone();
+        let allow_clients = self.allow_clients;
 
         Box::pin(async move {
             let (mut parts, body) = req.into_parts();
             match verifier.authenticate(&parts).await {
+                Ok(user) if user.is_client && !allow_clients => {
+                    Ok(TokenError::UserRequired.into_response())
+                }
                 Ok(user) => {
                     parts.extensions.insert(user);
                     service

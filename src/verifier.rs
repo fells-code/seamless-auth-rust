@@ -284,6 +284,9 @@ pub struct TokenUser {
     pub amr: Vec<String>,
     /// Seconds since the epoch.
     pub auth_time: Option<i64>,
+    /// A client-credentials token: `sub` is the client id, a machine acting for
+    /// itself with no user behind it. `sub` is then a client id, not a user id.
+    pub is_client: bool,
     pub iat: Option<i64>,
     pub exp: i64,
     /// The access token, for calling further APIs on the caller's behalf.
@@ -317,6 +320,7 @@ impl fmt::Debug for TokenUser {
             .field("acr", &self.acr)
             .field("amr", &self.amr)
             .field("auth_time", &self.auth_time)
+            .field("is_client", &self.is_client)
             .field("iat", &self.iat)
             .field("exp", &self.exp)
             .field("token", &"[redacted]")
@@ -347,6 +351,12 @@ pub enum TokenError {
     /// 401 `{"error":"invalid_token"}` with
     /// `WWW-Authenticate: Bearer error="invalid_token"`.
     InvalidToken,
+    /// The token is valid but is a client-credentials token, and the route
+    /// requires a user ([`RequireTokenLayer::allow_clients`]). Answers 403
+    /// `{"error":"user_required"}` without a `WWW-Authenticate` header.
+    ///
+    /// [`RequireTokenLayer::allow_clients`]: crate::RequireTokenLayer::allow_clients
+    UserRequired,
 }
 
 impl fmt::Display for TokenError {
@@ -354,6 +364,7 @@ impl fmt::Display for TokenError {
         f.write_str(match self {
             TokenError::MissingToken => "missing_token",
             TokenError::InvalidToken => "invalid_token",
+            TokenError::UserRequired => "user_required",
         })
     }
 }
@@ -363,6 +374,9 @@ impl std::error::Error for TokenError {}
 impl IntoResponse for TokenError {
     fn into_response(self) -> Response {
         let (code, challenge) = match self {
+            TokenError::UserRequired => {
+                return json_response(StatusCode::FORBIDDEN, &json!({ "error": "user_required" }));
+            }
             TokenError::MissingToken => ("missing_token", "Bearer"),
             TokenError::InvalidToken => ("invalid_token", "Bearer error=\"invalid_token\""),
         };
@@ -589,6 +603,7 @@ impl VerifierInner {
         };
 
         Ok(TokenUser {
+            is_client: sub == client_id,
             sub,
             client_id,
             scopes,
