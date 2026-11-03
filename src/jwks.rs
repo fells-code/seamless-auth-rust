@@ -1,10 +1,10 @@
 use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::Mutex;
 
 use crate::jwt::{CLOCK_SKEW_SECS, Claims};
 
@@ -22,7 +22,10 @@ const MAX_JWKS_BYTES: usize = 256 * 1024;
 pub(crate) struct JwksCache {
     url: String,
     client: reqwest::Client,
+    /// Held only to read or update the key set, never across a fetch.
     state: Mutex<KeySet>,
+    /// Held across a fetch, so only one runs at a time.
+    fetching: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -63,6 +66,17 @@ struct JwkSet {
     keys: Vec<Jwk>,
 }
 
+/// What the key set holds for a kid.
+enum Lookup {
+    Fresh(Key),
+    /// A key from a set past its maximum age, or none, and whether a fetch is
+    /// due.
+    Cached {
+        key: Option<Key>,
+        due: bool,
+    },
+}
+
 impl JwksCache {
     pub fn new(auth_server_url: &str, client: reqwest::Client) -> Self {
         Self::at(format!("{auth_server_url}/.well-known/jwks.json"), client)
@@ -73,16 +87,61 @@ impl JwksCache {
             url,
             client,
             state: Mutex::new(KeySet::default()),
+            fetching: tokio::sync::Mutex::new(()),
         }
     }
 
     pub async fn key(&self, kid: &str) -> Result<Key, String> {
-        let mut state = self.state.lock().await;
+        let cached = match self.lookup(kid) {
+            Lookup::Fresh(key)
+            | Lookup::Cached {
+                key: Some(key),
+                due: false,
+            } => return Ok(key),
+            Lookup::Cached { key, .. } => key,
+        };
+        // A kid already cached is served while another caller fetches, so a slow
+        // JWKS endpoint never holds up tokens it would verify anyway. An unknown
+        // kid waits for the fetch in flight, which may bring it.
+        let _fetching = match cached {
+            Some(key) => match self.fetching.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => return Ok(key),
+            },
+            None => self.fetching.lock().await,
+        };
+        match self.lookup(kid) {
+            Lookup::Fresh(key) => return Ok(key),
+            Lookup::Cached { key, due: false } => {
+                return key.ok_or_else(|| format!("unknown key id {kid:?}"));
+            }
+            Lookup::Cached { due: true, .. } => {}
+        }
 
+        self.lock_state().attempted_at = Some(Instant::now());
+        let fetched = self.fetch().await;
+        let mut state = self.lock_state();
+        match fetched {
+            Ok(keys) => {
+                state.keys = Some(keys);
+                state.fetched_at = Some(Instant::now());
+            }
+            // A stale key set keeps verifying while the API cannot be reached,
+            // rather than signing every user out.
+            Err(err) if state.keys.is_some() => {
+                tracing::warn!("[seamless-auth] Could not refresh the JWKS ({err}).");
+            }
+            Err(err) => return Err(err),
+        }
+        known(&state, kid)
+    }
+
+    fn lookup(&self, kid: &str) -> Lookup {
+        let state = self.lock_state();
         let fresh = state.fetched_at.is_some_and(|at| at.elapsed() < MAX_AGE);
-        let known = state.keys.as_ref().and_then(|keys| keys.get(kid)).cloned();
-        if let (true, Some(key)) = (fresh, &known) {
-            return Ok(key.clone());
+        let key = state.keys.as_ref().and_then(|keys| keys.get(kid)).cloned();
+        if let (true, Some(key)) = (fresh, &key) {
+            return Lookup::Fresh(key.clone());
         }
 
         let backoff = if state.keys.is_some() {
@@ -90,36 +149,20 @@ impl JwksCache {
         } else {
             FAILED_FETCH_BACKOFF
         };
-        if state.attempted_at.is_none_or(|at| at.elapsed() >= backoff) {
-            state.attempted_at = Some(Instant::now());
-            match self.fetch().await {
-                Ok(keys) => {
-                    state.keys = Some(keys);
-                    state.fetched_at = Some(Instant::now());
-                }
-                // A stale key set keeps verifying while the API cannot be reached,
-                // rather than signing every user out.
-                Err(err) if state.keys.is_some() => {
-                    tracing::warn!("[seamless-auth] Could not refresh the JWKS ({err}).");
-                }
-                Err(err) => return Err(err),
-            }
-        }
+        let due = state.attempted_at.is_none_or(|at| at.elapsed() >= backoff);
+        Lookup::Cached { key, due }
+    }
 
-        state
-            .keys
-            .as_ref()
-            .and_then(|keys| keys.get(kid))
-            .cloned()
-            .ok_or_else(|| format!("unknown key id {kid:?}"))
+    fn lock_state(&self) -> MutexGuard<'_, KeySet> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Makes the last fetch attempt look older than the refetch interval, so the
     /// next unknown kid fetches again.
     #[cfg(test)]
     pub(crate) async fn backdate_attempt(&self) {
-        let mut state = self.state.lock().await;
-        state.attempted_at = Instant::now().checked_sub(REFETCH_INTERVAL + Duration::from_secs(1));
+        self.lock_state().attempted_at =
+            Instant::now().checked_sub(REFETCH_INTERVAL + Duration::from_secs(1));
     }
 
     async fn fetch(&self) -> Result<HashMap<String, Key>, String> {
@@ -186,4 +229,13 @@ impl JwksCache {
             .map(|data| data.claims)
             .map_err(|e| e.to_string())
     }
+}
+
+fn known(state: &KeySet, kid: &str) -> Result<Key, String> {
+    state
+        .keys
+        .as_ref()
+        .and_then(|keys| keys.get(kid))
+        .cloned()
+        .ok_or_else(|| format!("unknown key id {kid:?}"))
 }
