@@ -64,8 +64,9 @@ so CI builds what was tested.
 - `src/adapter.rs`: `Adapter`, the router, the request pipeline, the upstream call, writing replies.
 - `src/routes.rs`: manifest routes, credential resolution (with silent refresh), session
   verification, what a cookie-transport body may contain.
-- `src/refresh.rs`: refresh sharing (one rotation per refresh token while in flight, on its own task),
-  `POST /refresh`, logout.
+- `src/refresh.rs`: refresh sharing (one rotation per refresh token while in flight, on its own task,
+  and for cookie transport only a successful rotation kept for 5 seconds for other tabs; bearer
+  replays always reach the API), `POST /refresh`, logout.
 - `src/manifest.rs`: parsing, matching, the live and embedded manifest.
 - `src/guard.rs`: `require_auth`, `authenticate`, the `User` extractor.
 - `src/console.rs`: `console_router`, the admin dashboard proxy.

@@ -447,7 +447,7 @@ impl Inner {
             // the browser holds, so the one it just issued is the one to spend.
             Some((token, _)) if token.is_empty() => return,
             Some((token, subject)) => {
-                self.refresh_session(format!("fresh:{token}"), &token, &subject, forwarded)
+                self.refresh_session(format!("fresh:{token}"), false, &token, &subject, forwarded)
                     .await
             }
             None => self.silent_refresh(headers, forwarded).await,

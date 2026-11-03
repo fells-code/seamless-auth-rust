@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
@@ -14,6 +14,8 @@ use crate::jwt::{Claims, str_claim};
 use crate::routes::{carries_session, cookie_transport_body};
 
 const FLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a completed cookie-transport rotation is handed to later callers.
+const COOKIE_WINDOW: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 pub(crate) enum RefreshOutcome {
@@ -32,9 +34,26 @@ struct Flight {
     rx: watch::Receiver<Option<RefreshOutcome>>,
 }
 
+struct Completed {
+    at: Instant,
+    outcome: RefreshOutcome,
+}
+
+#[derive(Default)]
+struct Flights {
+    running: HashMap<String, Flight>,
+    completed: HashMap<String, Completed>,
+}
+
+impl Flights {
+    fn prune(&mut self) {
+        self.completed.retain(|_, c| c.at.elapsed() < COOKIE_WINDOW);
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Refresher {
-    flights: Mutex<HashMap<String, Flight>>,
+    flights: Mutex<Flights>,
     next_id: Mutex<u64>,
 }
 
@@ -42,8 +61,13 @@ impl Refresher {
     /// Runs `rotation` once per key at a time, and hands its outcome to every
     /// caller that presents the same key while it is in flight, so parallel
     /// requests from several tabs with one expired session all succeed instead of
-    /// tripping the auth API's reuse detection. Nothing is kept once it settles: a
-    /// later caller is sent to the auth API, which sees a replayed token as reuse.
+    /// tripping the auth API's reuse detection.
+    ///
+    /// With `keep` (cookie transport), a successful rotation is also handed to
+    /// callers that present the key within five seconds of it settling, for tabs
+    /// that sent the old refresh cookie just after another tab rotated it.
+    /// Otherwise nothing is kept once it settles: a later caller is sent to the
+    /// auth API, which sees a replayed token as reuse.
     ///
     /// The rotation runs on its own task: a caller that goes away mid-flight must
     /// not drop a rotation the auth API has already made, or every other tab would
@@ -51,14 +75,21 @@ impl Refresher {
     pub async fn share<Fut>(
         self: &Arc<Self>,
         key: String,
+        keep: bool,
         rotation: impl FnOnce() -> Fut,
     ) -> RefreshOutcome
     where
         Fut: Future<Output = RefreshOutcome> + Send + 'static,
     {
         let mut rx = {
-            let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
-            match flights.get(&key) {
+            let mut flights = self.lock();
+            if keep {
+                flights.prune();
+                if let Some(done) = flights.completed.get(&key) {
+                    return done.outcome.clone();
+                }
+            }
+            match flights.running.get(&key) {
                 Some(flight) => flight.rx.clone(),
                 None => {
                     let id = {
@@ -67,7 +98,9 @@ impl Refresher {
                         *next
                     };
                     let (tx, rx) = watch::channel(None);
-                    flights.insert(key.clone(), Flight { id, rx: rx.clone() });
+                    flights
+                        .running
+                        .insert(key.clone(), Flight { id, rx: rx.clone() });
 
                     let this = self.clone();
                     let rotation = rotation();
@@ -78,7 +111,7 @@ impl Refresher {
                         let outcome = tokio::time::timeout(FLIGHT_TIMEOUT, rotation)
                             .await
                             .unwrap_or_else(|_| RefreshOutcome::Failed("refresh timed out".into()));
-                        this.settle(&flight_key, id);
+                        this.settle(&flight_key, id, keep, &outcome);
                         let _ = tx.send(Some(outcome));
                     });
                     rx
@@ -91,20 +124,56 @@ impl Refresher {
             Ok(outcome) => outcome.unwrap_or_else(|| RefreshOutcome::Failed("refresh lost".into())),
             // The rotation task ended without an answer (it panicked).
             Err(_) => {
-                let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
-                if flights.get(&key).is_some_and(|f| f.rx.same_channel(&rx)) {
-                    flights.remove(&key);
+                let mut flights = self.lock();
+                if flights
+                    .running
+                    .get(&key)
+                    .is_some_and(|f| f.rx.same_channel(&rx))
+                {
+                    flights.running.remove(&key);
                 }
                 RefreshOutcome::Failed("refresh task ended".into())
             }
         }
     }
 
-    fn settle(&self, key: &str, id: u64) {
-        let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
-        if flights.get(key).is_some_and(|f| f.id == id) {
-            flights.remove(key);
+    /// Ends a flight. A kept outcome is stored under the same lock, so no caller
+    /// can find the key neither running nor completed and replay it.
+    fn settle(&self, key: &str, id: u64, keep: bool, outcome: &RefreshOutcome) {
+        let mut flights = self.lock();
+        if flights.running.get(key).is_some_and(|f| f.id == id) {
+            flights.running.remove(key);
         }
+        flights.prune();
+        if keep && matches!(outcome, RefreshOutcome::Session(_)) {
+            flights.completed.insert(
+                key.to_string(),
+                Completed {
+                    at: Instant::now(),
+                    outcome: outcome.clone(),
+                },
+            );
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Flights> {
+        self.flights.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Makes every completed rotation look older than the window.
+    #[cfg(test)]
+    pub(crate) fn backdate_completed(&self) {
+        let at = Instant::now().checked_sub(COOKIE_WINDOW + Duration::from_secs(1));
+        for done in self.lock().completed.values_mut() {
+            if let Some(at) = at {
+                done.at = at;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completed_len(&self) -> usize {
+        self.lock().completed.len()
     }
 }
 
@@ -134,15 +203,22 @@ impl Inner {
             return Err(SilentRefreshError::Failed("invalid refresh cookie".into()));
         }
         let subject = payload.as_ref().map(|p| str_claim(p, "sub")).unwrap_or("");
-        self.refresh_session(format!("cookie:{raw}"), refresh_token, subject, forwarded)
-            .await
+        self.refresh_session(
+            format!("cookie:{raw}"),
+            true,
+            refresh_token,
+            subject,
+            forwarded,
+        )
+        .await
     }
 
-    /// Rotates a refresh token, shared under `key`, and returns the verified
-    /// session with its cookies.
+    /// Rotates a refresh token, shared under `key` (and kept for the cookie
+    /// window with `keep`), and returns the verified session with its cookies.
     pub(crate) async fn refresh_session(
         self: &Arc<Self>,
         key: String,
+        keep: bool,
         refresh_token: &str,
         subject: &str,
         forwarded: &Forwarded,
@@ -160,8 +236,18 @@ impl Inner {
         let forwarded = forwarded.clone();
         let outcome = self
             .refreshes
-            .share(key, move || async move {
-                inner.rotate(&forwarded, &refresh_token, service).await
+            .share(key, keep, move || async move {
+                // Verified before it settles, so a session the adapter would refuse
+                // is never kept.
+                match inner.rotate(&forwarded, &refresh_token, service).await {
+                    RefreshOutcome::Session(session) => {
+                        match inner.verify_session(&session, "access").await {
+                            Ok(_) => RefreshOutcome::Session(session),
+                            Err(err) => RefreshOutcome::Failed(err),
+                        }
+                    }
+                    other => other,
+                }
             })
             .await;
 
@@ -237,7 +323,7 @@ impl Inner {
             let forwarded = forwarded.clone();
             let outcome = self
                 .refreshes
-                .share(format!("bearer:{token}"), move || async move {
+                .share(format!("bearer:{token}"), false, move || async move {
                     inner.rotate(&forwarded, &refresh_token, service).await
                 })
                 .await;
