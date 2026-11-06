@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use crate::adapter::{json_response, read_limited};
 use crate::jwks::JwksCache;
 use crate::jwt::CLOCK_SKEW_SECS;
+use crate::permission::{permissions_omitted, string_list};
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCOVERY_BACKOFF: Duration = Duration::from_secs(5);
@@ -73,7 +74,7 @@ pub enum VerifierBuildError {
     InvalidJwksUri,
     /// A step-up guard names no `acr_values`, `amr` or `max_age`.
     EmptyStepUp,
-    /// A scope or role guard names no values, or an empty one.
+    /// A scope, role or permission guard names no values, or an empty one.
     EmptyGuard,
     /// A guard value cannot be carried in a `WWW-Authenticate` header.
     InvalidChallenge(String),
@@ -97,7 +98,7 @@ impl fmt::Display for VerifierBuildError {
                 f.write_str("seamless-auth: a step-up guard needs acr_values, amr or max_age")
             }
             VerifierBuildError::EmptyGuard => f.write_str(
-                "seamless-auth: a scope or role guard needs at least one non-empty value",
+                "seamless-auth: a scope, role or permission guard needs at least one non-empty value",
             ),
             VerifierBuildError::InvalidChallenge(what) => {
                 write!(f, "seamless-auth: {what:?} cannot be sent in a challenge")
@@ -269,7 +270,7 @@ impl fmt::Debug for Confirmation {
 /// in the request extensions, and it is an extractor for handlers behind it.
 ///
 /// A client-credentials token (`sub` equal to `client_id`) carries no user
-/// claims, so it has no roles, `acr`, `amr` or `auth_time`.
+/// claims, so it has no roles, permissions, `acr`, `amr` or `auth_time`.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TokenUser {
@@ -280,6 +281,16 @@ pub struct TokenUser {
     pub roles: Vec<String>,
     pub sid: Option<String>,
     pub org_id: Option<String>,
+    /// The `permissions` claim. Provider tokens do not carry it until
+    /// fells-code/seamless-auth-oidc-provider#47, so this is empty today.
+    pub permissions: Vec<String>,
+    /// The `org_roles` claim, under the same condition as `permissions`.
+    pub org_roles: Vec<String>,
+    /// The `org_permissions` claim, under the same condition as `permissions`.
+    pub org_permissions: Vec<String>,
+    /// The token left its permissions out because they would not fit.
+    /// [`Verifier::require_permission`] denies such a token.
+    pub permissions_omitted: bool,
     pub acr: Option<String>,
     pub amr: Vec<String>,
     /// Seconds since the epoch.
@@ -317,6 +328,10 @@ impl fmt::Debug for TokenUser {
             .field("roles", &self.roles)
             .field("sid", &self.sid)
             .field("org_id", &self.org_id)
+            .field("permissions", &self.permissions)
+            .field("org_roles", &self.org_roles)
+            .field("org_permissions", &self.org_permissions)
+            .field("permissions_omitted", &self.permissions_omitted)
             .field("acr", &self.acr)
             .field("amr", &self.amr)
             .field("auth_time", &self.auth_time)
@@ -610,6 +625,10 @@ impl VerifierInner {
             roles: strings("roles")?,
             sid: string("sid")?,
             org_id,
+            permissions: string_list(claims, "permissions"),
+            org_roles: string_list(claims, "org_roles"),
+            org_permissions: string_list(claims, "org_permissions"),
+            permissions_omitted: permissions_omitted(claims),
             acr: string("acr")?,
             amr: strings("amr")?,
             auth_time: number("auth_time")?,

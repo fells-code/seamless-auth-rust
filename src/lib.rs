@@ -49,6 +49,7 @@ mod jwt;
 mod manifest;
 mod options;
 mod origin;
+mod permission;
 mod refresh;
 mod routes;
 mod service_token;
@@ -64,6 +65,7 @@ pub use delivery::{Delivery, DeliveryError};
 pub use guard::{RequireAuth, RequireAuthLayer, Unauthenticated, User};
 pub use manifest::{MANIFEST_PATH, Manifest, ManifestError, ManifestRoute, PickBody};
 pub use options::{BuildError, Builder, SameSite};
+pub use permission::PermissionRule;
 pub use token_guard::{RequireToken, RequireTokenLayer, StepUp, TokenGuard, TokenGuardLayer};
 pub use verifier::{
     Confirmation, TokenError, TokenUser, Verifier, VerifierBuildError, VerifierBuilder,
