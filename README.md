@@ -102,9 +102,12 @@ applies whatever the cookies' `SameSite` setting (a sibling subdomain is same-si
 
 A bearer token is never attached by a browser, so it is not checked.
 
-`User` carries `id`, `roles`, `email`, `phone`, `token`, `recovery` and `organization_id`. The
+`User` carries `id`, `roles`, `email`, `phone`, `token`, `recovery`, `organization_id`,
+`permissions`, `organization_roles`, `organization_permissions` and `permissions_omitted`. The
 organization is the `org_id` claim of the verified access token, `None` when the session has
-none; the cookie's own copy is never read.
+none; the cookie's own copy is never read. The permission fields come from the same token, and
+when `permissions_omitted` is true the lists are empty because the token left them out, which means
+"ask", not "none".
 
 ### Roles
 
@@ -124,6 +127,65 @@ let app: Router = Router::new()
 
 `User::has_role("orders:read")` applies the same matching inside a handler. A recovery session
 still answers 403 `enrollment_required` unless the layer is built with `.allow_recovery(true)`.
+
+### Permissions
+
+Permissions need the auth API at v0.23, which issues them in the access token.
+
+`require_permission([...])` does what `require_auth()` does, then answers 403
+`{"error":"insufficient_permission"}` unless the user holds at least one of the listed permissions.
+`require_all_permissions([...])` needs every one of them, and each may come from either claim. The
+body never names a permission.
+
+```rust
+use seamless_auth::PermissionRule;
+
+// Lead with this form for a route that names an organization. Without it, a token for
+// organization A passes on /orgs/B/projects.
+let in_org = auth.require_permission_rule(
+    PermissionRule::any(["projects:write"]).organization_from_path("organizationId"),
+)?;
+let app: Router = Router::new()
+    .route("/orgs/{organizationId}/projects", post(create).route_layer(in_org))
+    .route(
+        "/reports",
+        get(reports).route_layer(auth.require_permission(["reports:read", "reports:admin"])?),
+    )
+    .route(
+        "/invoices",
+        post(invoice).route_layer(auth.require_all_permissions(["invoices:read", "invoices:write"])?),
+    );
+```
+
+Matching is exact and case-sensitive, unlike a role: no trimming, no wildcards, and no implied
+grants, so `invoices:write` does not satisfy `invoices:read`. Which claims count depends on the
+scope, given by a `PermissionRule` (`any` or `all`) passed to `require_permission_rule`:
+
+| Rule | A permission counts from | Also requires |
+| --- | --- | --- |
+| Default | `permissions` or `org_permissions` | |
+| `.organization()` | `org_permissions` only | A non-empty `org_id` |
+| `.organization_from_path("organizationId")` | `org_permissions` only | The route parameter equals `org_id` exactly |
+
+The bound form reads the matched route's parameters, so the guard goes on the route with
+`route_layer` (or `Router::layer`). A route without that parameter, or a guard wrapped around the
+whole router, refuses everyone. Organization roles never count for `require_role`.
+
+An empty list, or an empty permission, is refused at setup with `BuildError::EmptyGuard`, in any
+mode and scope, so an empty list can never open a route. A claim that is not an array reads as
+empty, and non-string entries are ignored.
+
+A token that would not fit its permissions carries `permissions_omitted: true` instead. The guard
+then reads `GET {auth_server_url}/users/me/permissions` with the caller's token on every request,
+with no cache and no retry, using the adapter's HTTP client and its timeout, and applies the same
+rules to the answer. `User` keeps what the token said.
+
+| Outcome | Status | Body |
+| --- | --- | --- |
+| No valid session, or the live read answers 401 | 401 | `{"error":"unauthenticated"}` |
+| Recovery session | 403 | `{"error":"enrollment_required"}` |
+| Requirement not met | 403 | `{"error":"insufficient_permission"}` |
+| Live read fails: another non-2xx, a timeout, or a malformed body | 503 | `{"error":"permissions_unavailable"}` |
 
 ### Optional user
 
@@ -406,6 +468,7 @@ get(my_orders).route_layer(verifier.require_auth().allow_clients(false))
 | `allow_clients(false)`: client-credentials token | 403 | none | `{"error":"user_required"}` |
 | `require_scope`: not every scope granted | 403 | `Bearer error="insufficient_scope", scope="..."` | `{"error":"insufficient_scope","scope":"..."}` |
 | `require_role`: no listed role granted | 403 | none | `{"error":"insufficient_role"}` |
+| `require_permission`: not met | 403 | none | `{"error":"insufficient_permission"}` |
 | `require_step_up`: not met | 401 | `Bearer error="insufficient_user_authentication", ...` (RFC 9470) | `{"error":"insufficient_user_authentication",...}` |
 
 `require_role` uses the same scoped matching as the JS adapters: `orders:write` grants
@@ -413,9 +476,16 @@ get(my_orders).route_layer(verifier.require_auth().allow_clients(false))
 of `acr_values` (listing `phr` also accepts `phrh`), `amr` (all required) and `max_age` in seconds
 since `auth_time`.
 
-The guards return an error at setup when they would require nothing: `require_scope` or
-`require_role` with no values or an empty value, or `require_step_up` with none of its three
-settings.
+`require_permission`, `require_all_permissions` and `require_permission_rule` are the same guards
+as the adapter's, with exact matching, and the same `PermissionRule`. They need the auth API at
+v0.23, and they deny today: provider tokens do not carry these claims until
+fells-code/seamless-auth-oidc-provider#47. A token with `permissions_omitted` also answers 403, not
+a live read, because the first-party endpoint refuses provider tokens. `TokenUser` exposes
+`permissions`, `org_roles`, `org_permissions` and `permissions_omitted`.
+
+The guards return an error at setup when they would require nothing: `require_scope`,
+`require_role` or a permission guard with no values or an empty value, or `require_step_up` with
+none of its three settings.
 
 A token bound to a key (a `cnf` claim) is refused unless you add a `confirmation` hook. It gets the
 claim and the request, so a DPoP proof can be checked against `cnf.jkt`:
@@ -462,6 +532,10 @@ With `VERIFY_ONLY_ISSUER` and `VERIFY_ONLY_AUDIENCE` set (and `VERIFY_ONLY_JWKS_
 discovery), the reference app also serves verify-only routes under `/verify-only`: `/me`,
 `/orders` (scope `orders:write`), `/admin` (role `admin`) and `/step-up` (`acr` `phr` within 300
 seconds).
+
+The permission specs need the auth API at v0.23 and are a pending contract in the suite, so turn
+them on with `SEAMLESS_VERIFY_CONTRACTS=permission-guards`. They drive `/api/permissions/any`,
+`/all`, `/org` and `/org/{organizationId}` on the reference app.
 
 ## Status
 

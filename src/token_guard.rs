@@ -13,6 +13,7 @@ use tower_layer::Layer;
 use tower_service::Service;
 
 use crate::adapter::json_response;
+use crate::permission::{Held, PermissionRule, insufficient_permission};
 use crate::verifier::{ClockFn, TokenError, TokenUser, Verifier, VerifierBuildError};
 
 /// Whether a granted role satisfies a required one, as `roleGrantsAccess` in
@@ -93,6 +94,7 @@ enum Check {
         challenge: HeaderValue,
     },
     Role(Vec<String>),
+    Permission(PermissionRule),
     StepUp {
         step_up: StepUp,
         accepted_acr: Vec<String>,
@@ -165,6 +167,55 @@ impl Verifier {
         })
     }
 
+    /// A guard that answers 403 `{"error":"insufficient_permission"}` unless the
+    /// token holds at least one of `permissions`, from the `permissions` or
+    /// `org_permissions` claim, compared exactly. Place it behind
+    /// [`require_auth`](Self::require_auth).
+    ///
+    /// Provider tokens do not carry these claims until
+    /// fells-code/seamless-auth-oidc-provider#47, so today it denies. A token with
+    /// `permissions_omitted` is denied too: there is no live read here, because
+    /// the first-party endpoint refuses provider tokens.
+    ///
+    /// An empty list, or an empty permission, is an error.
+    pub fn require_permission<I, T>(
+        &self,
+        permissions: I,
+    ) -> Result<TokenGuardLayer, VerifierBuildError>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        self.require_permission_rule(PermissionRule::any(permissions))
+    }
+
+    /// Like [`require_permission`](Self::require_permission), but every one of
+    /// `permissions` must be held. Each may come from either claim.
+    pub fn require_all_permissions<I, T>(
+        &self,
+        permissions: I,
+    ) -> Result<TokenGuardLayer, VerifierBuildError>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        self.require_permission_rule(PermissionRule::all(permissions))
+    }
+
+    /// Like [`require_permission`](Self::require_permission), for a
+    /// [`PermissionRule`] with an organization scope.
+    pub fn require_permission_rule(
+        &self,
+        rule: PermissionRule,
+    ) -> Result<TokenGuardLayer, VerifierBuildError> {
+        if rule.requires_nothing() {
+            return Err(VerifierBuildError::EmptyGuard);
+        }
+        Ok(TokenGuardLayer {
+            check: Arc::new(Check::Permission(rule)),
+        })
+    }
+
     /// A guard that answers 401 with the RFC 9470 `insufficient_user_authentication`
     /// challenge unless the token's `acr`, `amr` and `auth_time` meet `step_up`.
     /// Place it behind [`require_auth`](Self::require_auth).
@@ -201,7 +252,7 @@ fn check_challenge_value(value: &str) -> Result<(), VerifierBuildError> {
 }
 
 impl Check {
-    fn reject(&self, user: &TokenUser) -> Option<Response> {
+    fn reject(&self, user: &TokenUser, route_organization: Option<&str>) -> Option<Response> {
         match self {
             Check::Scope {
                 required,
@@ -227,6 +278,18 @@ impl Check {
                     StatusCode::FORBIDDEN,
                     &json!({ "error": "insufficient_role" }),
                 ))
+            }
+            Check::Permission(rule) => {
+                let allowed = !user.permissions_omitted
+                    && rule.allows(
+                        Held {
+                            permissions: &user.permissions,
+                            organization_id: user.org_id.as_deref(),
+                            organization_permissions: &user.org_permissions,
+                        },
+                        route_organization,
+                    );
+                (!allowed).then(insufficient_permission)
             }
             Check::StepUp {
                 step_up,
@@ -366,8 +429,8 @@ where
     }
 }
 
-/// The layer [`Verifier::require_scope`], [`Verifier::require_role`] and
-/// [`Verifier::require_step_up`] return. Reached without a [`TokenUser`], it
+/// The layer [`Verifier::require_scope`], [`Verifier::require_role`],
+/// [`Verifier::require_permission`] and [`Verifier::require_step_up`] return. Reached without a [`TokenUser`], it
 /// answers as if no token was sent.
 #[derive(Clone)]
 pub struct TokenGuardLayer {
@@ -421,12 +484,17 @@ where
     fn call(&mut self, req: Request) -> Self::Future {
         let clone = self.service.clone();
         let mut service = std::mem::replace(&mut self.service, clone);
-        let rejected = match req.extensions().get::<TokenUser>() {
-            None => Some(TokenError::MissingToken.into_response()),
-            Some(user) => self.check.reject(user),
-        };
+        let check = self.check.clone();
 
         Box::pin(async move {
+            let (req, route_organization) = match check.as_ref() {
+                Check::Permission(rule) => rule.route_organization(req).await,
+                _ => (req, None),
+            };
+            let rejected = match req.extensions().get::<TokenUser>() {
+                None => Some(TokenError::MissingToken.into_response()),
+                Some(user) => check.reject(user, route_organization.as_deref()),
+            };
             match rejected {
                 Some(res) => Ok(res),
                 None => service.call(req).await.map(IntoResponse::into_response),

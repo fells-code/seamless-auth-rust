@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use axum::extract::Path;
 use axum::routing::get;
 use axum::{Json, Router};
-use seamless_auth::{Adapter, Delivery, StepUp, TokenUser, User, Verifier};
+use seamless_auth::{Adapter, Delivery, PermissionRule, StepUp, TokenUser, User, Verifier};
 use serde_json::{Value, json};
 
 type Captured = Arc<Mutex<HashMap<String, Value>>>;
@@ -58,6 +58,22 @@ async fn main() {
         .build()
         .unwrap_or_else(|e| panic!("{e}"));
 
+    let me = || get(|user: User| async move { Json(json!({ "id": user.id })) });
+    let any_permission = auth
+        .require_permission(["conformance:read", "conformance:other"])
+        .unwrap_or_else(|e| panic!("{e}"));
+    let all_permissions = auth
+        .require_all_permissions(["conformance:read", "conformance:write"])
+        .unwrap_or_else(|e| panic!("{e}"));
+    let org_permission = auth
+        .require_permission_rule(PermissionRule::any(["conformance:org"]).organization())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let bound_org_permission = auth
+        .require_permission_rule(
+            PermissionRule::any(["conformance:org"]).organization_from_path("organizationId"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
     let app = Router::new()
         .route("/", get(|| async { Json(json!({ "ok": true })) }))
         .route(
@@ -76,10 +92,13 @@ async fn main() {
                 }
             }),
         )
+        .route("/api/me", me().route_layer(auth.require_auth()))
+        .route("/api/permissions/any", me().route_layer(any_permission))
+        .route("/api/permissions/all", me().route_layer(all_permissions))
+        .route("/api/permissions/org", me().route_layer(org_permission))
         .route(
-            "/api/me",
-            get(|user: User| async move { Json(json!({ "id": user.id })) })
-                .route_layer(auth.require_auth()),
+            "/api/permissions/org/{organizationId}",
+            me().route_layer(bound_org_permission),
         )
         .nest("/auth", auth.router());
     let app = match verify_only_routes() {

@@ -294,6 +294,10 @@ fn debug_output_redacts_the_token() {
         token: "live-access-token".into(),
         recovery: false,
         organization_id: None,
+        permissions: vec![],
+        organization_roles: vec![],
+        organization_permissions: vec![],
+        permissions_omitted: false,
     };
     assert!(!format!("{user:?}").contains("live-access-token"));
 }
@@ -699,6 +703,10 @@ fn has_role_matches_scoped_roles() {
         token: "t".into(),
         recovery: false,
         organization_id: None,
+        permissions: vec![],
+        organization_roles: vec![],
+        organization_permissions: vec![],
+        permissions_omitted: false,
     };
     for (role, granted) in [
         ("orders:write", true),

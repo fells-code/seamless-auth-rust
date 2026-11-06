@@ -69,6 +69,8 @@ so CI builds what was tested.
   replays always reach the API), `POST /refresh`, logout.
 - `src/manifest.rs`: parsing, matching, the live and embedded manifest.
 - `src/guard.rs`: `require_auth`, `authenticate`, the `User` extractor.
+- `src/permission.rs`: `PermissionRule` and exact matching for the permission guards in `guard.rs`
+  and `token_guard.rs`.
 - `src/console.rs`: `console_router`, the admin dashboard proxy.
 - `src/cookies.rs`, `src/jwt.rs`, `src/jwks.rs`, `src/service_token.rs`: HS256 cookies and service
   tokens, RS256 against the API's JWKS.

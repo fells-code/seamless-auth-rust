@@ -9,6 +9,7 @@ mod magic_link;
 mod manifest;
 mod notices;
 mod origin;
+mod permission;
 mod recovery;
 mod refresh;
 mod verifier;

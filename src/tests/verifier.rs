@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::token_guard::role_grants_access;
 use crate::verifier::jwks_uri_from;
-use crate::{StepUp, TokenGuardLayer, TokenUser, Verifier, VerifierBuildError};
+use crate::{PermissionRule, StepUp, TokenGuardLayer, TokenUser, Verifier, VerifierBuildError};
 
 // Copied byte for byte from seamless-auth-server,
 // packages/core/tests/fixtures/verify-only/vectors.json, which every adapter's
@@ -422,6 +422,250 @@ async fn guard_without_verification_answers_missing_token() {
     assert_eq!(status, 401);
     assert_eq!(challenge.as_deref(), Some("Bearer"));
     assert_eq!(body, json!({ "error": "missing_token" }));
+}
+
+fn permission_app(verifier: &Verifier, guard: TokenGuardLayer) -> Router {
+    let handler = || get(|user: TokenUser| async move { Json(json!({ "sub": user.sub })) });
+    Router::new()
+        .route(
+            "/resource",
+            handler()
+                .route_layer(guard.clone())
+                .route_layer(verifier.require_auth()),
+        )
+        .route(
+            "/orgs/{organizationId}",
+            handler()
+                .route_layer(guard)
+                .route_layer(verifier.require_auth()),
+        )
+}
+
+#[tokio::test]
+async fn require_permission_decides_from_the_token() {
+    let api = FakeApi::start().await;
+    let verifier = Verifier::builder(&api.url)
+        .audience("https://api.example.test")
+        .jwks_uri(format!("{}/.well-known/jwks.json", api.url))
+        .build()
+        .unwrap();
+    let any = || verifier.require_permission(["a:read", "a:other"]).unwrap();
+    let all = || {
+        verifier
+            .require_all_permissions(["a:read", "a:write"])
+            .unwrap()
+    };
+    let org = || {
+        verifier
+            .require_permission_rule(PermissionRule::any(["a:read"]).organization())
+            .unwrap()
+    };
+    let bound = || {
+        verifier
+            .require_permission_rule(
+                PermissionRule::any(["a:read"]).organization_from_path("organizationId"),
+            )
+            .unwrap()
+    };
+
+    let cases: Vec<(&str, TokenGuardLayer, &str, Value, u16)> = vec![
+        (
+            "a provider token today has no permission claims",
+            any(),
+            "/resource",
+            json!({}),
+            403,
+        ),
+        (
+            "any: one held",
+            any(),
+            "/resource",
+            json!({ "permissions": ["a:other"] }),
+            200,
+        ),
+        (
+            "any: an organization grant counts by default",
+            any(),
+            "/resource",
+            json!({ "org_permissions": ["a:read"] }),
+            200,
+        ),
+        (
+            "exact: write does not satisfy read",
+            any(),
+            "/resource",
+            json!({ "permissions": ["a:write"] }),
+            403,
+        ),
+        (
+            "all: one short",
+            all(),
+            "/resource",
+            json!({ "permissions": ["a:read"] }),
+            403,
+        ),
+        (
+            "all: each from either claim",
+            all(),
+            "/resource",
+            json!({ "permissions": ["a:read"], "org_permissions": ["a:write"] }),
+            200,
+        ),
+        (
+            "organization: needs org_id",
+            org(),
+            "/resource",
+            json!({ "org_permissions": ["a:read"] }),
+            403,
+        ),
+        (
+            "organization: an empty org_id is none",
+            org(),
+            "/resource",
+            json!({ "org_id": "", "org_permissions": ["a:read"] }),
+            403,
+        ),
+        (
+            "organization: instance grants do not count",
+            org(),
+            "/resource",
+            json!({ "org_id": "o1", "permissions": ["a:read"] }),
+            403,
+        ),
+        (
+            "organization: held",
+            org(),
+            "/resource",
+            json!({ "org_id": "o1", "org_permissions": ["a:read"] }),
+            200,
+        ),
+        (
+            "bound: matching route",
+            bound(),
+            "/orgs/o1",
+            json!({ "org_id": "o1", "org_permissions": ["a:read"] }),
+            200,
+        ),
+        (
+            "bound: another organization's route",
+            bound(),
+            "/orgs/o2",
+            json!({ "org_id": "o1", "org_permissions": ["a:read"] }),
+            403,
+        ),
+        (
+            "bound: no such parameter on the route",
+            bound(),
+            "/resource",
+            json!({ "org_id": "o1", "org_permissions": ["a:read"] }),
+            403,
+        ),
+        (
+            "malformed claims read as empty and do not fail verification",
+            any(),
+            "/resource",
+            json!({ "permissions": "a:read", "org_permissions": [1, null, {}], "org_roles": 7 }),
+            403,
+        ),
+        (
+            "non-string entries are ignored",
+            any(),
+            "/resource",
+            json!({ "permissions": [1, "a:read"] }),
+            200,
+        ),
+        // There is no live read: the first-party endpoint refuses provider tokens.
+        (
+            "permissions_omitted denies",
+            any(),
+            "/resource",
+            json!({ "permissions_omitted": true, "permissions": ["a:read"] }),
+            403,
+        ),
+    ];
+    for (name, guard, path, claims, want) in cases {
+        let token = own_token(&api.url, claims);
+        let req = Request::builder()
+            .uri(path)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = permission_app(&verifier, guard).oneshot(req).await.unwrap();
+        assert_eq!(res.status().as_u16(), want, "{name}");
+        if want == 403 {
+            assert!(!res.headers().contains_key("www-authenticate"), "{name}");
+            let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(body, r#"{"error":"insufficient_permission"}"#, "{name}");
+        }
+    }
+    assert!(api.calls_to("GET", "/users/me/permissions").is_empty());
+
+    let (status, challenge, body) = send(permission_app(&verifier, any()), None).await;
+    assert_eq!(status, 401);
+    assert_eq!(challenge.as_deref(), Some("Bearer"));
+    assert_eq!(body, json!({ "error": "missing_token" }));
+}
+
+#[tokio::test]
+async fn token_user_exposes_the_permission_claims() {
+    let api = FakeApi::start().await;
+    let verifier = Verifier::builder(&api.url)
+        .audience("https://api.example.test")
+        .jwks_uri(format!("{}/.well-known/jwks.json", api.url))
+        .build()
+        .unwrap();
+    let app = Router::new().route(
+        "/resource",
+        get(|user: TokenUser| async move {
+            Json(json!({
+                "permissions": user.permissions,
+                "org_roles": user.org_roles,
+                "org_permissions": user.org_permissions,
+                "permissions_omitted": user.permissions_omitted,
+            }))
+        })
+        .route_layer(verifier.require_auth()),
+    );
+    let token = own_token(
+        &api.url,
+        json!({
+            "permissions": ["a:read", 1],
+            "org_roles": ["admin"],
+            "org_permissions": "not a list",
+            "permissions_omitted": true,
+        }),
+    );
+    let (status, _, body) = send(app, Some(&format!("Bearer {token}"))).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body,
+        json!({
+            "permissions": ["a:read"],
+            "org_roles": ["admin"],
+            "org_permissions": [],
+            "permissions_omitted": true,
+        })
+    );
+}
+
+#[test]
+fn require_permission_refuses_an_empty_guard() {
+    let verifier = Verifier::builder("https://login.example.test")
+        .audience("a")
+        .build()
+        .unwrap();
+    let none = Vec::<String>::new;
+    for result in [
+        verifier.require_permission(none()),
+        verifier.require_all_permissions(none()),
+        verifier.require_permission_rule(PermissionRule::any(none()).organization()),
+        verifier.require_permission_rule(PermissionRule::all(none()).organization_from_path("id")),
+        verifier.require_permission([""]),
+        verifier.require_all_permissions(["a:read", " "]),
+    ] {
+        assert_eq!(result.unwrap_err(), VerifierBuildError::EmptyGuard);
+    }
+    assert!(verifier.require_permission(["a:read"]).is_ok());
 }
 
 #[test]

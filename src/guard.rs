@@ -12,11 +12,14 @@ use serde_json::{Value, json};
 use tower_layer::Layer;
 use tower_service::Service;
 
-use crate::adapter::{Adapter, Inner, bearer_token, json_response};
+use crate::adapter::{Adapter, Inner, MAX_BODY_BYTES, bearer_token, json_response, read_limited};
 use crate::cookies::{KIND_ACCESS, raw_cookie, read_cookie};
 use crate::jwt::{Claims, str_claim};
 use crate::options::BuildError;
 use crate::origin::check_origin;
+use crate::permission::{
+    Held, PermissionRule, insufficient_permission, permissions_omitted, string_list,
+};
 use crate::token_guard::role_grants_access;
 
 /// The session a request was authenticated with. [`RequireAuth`] puts it in the
@@ -43,6 +46,19 @@ pub struct User {
     /// The active organization, from the `org_id` claim of the verified access
     /// token. `None` when the session has no organization.
     pub organization_id: Option<String>,
+    /// The `permissions` claim. Empty when [`permissions_omitted`](Self::permissions_omitted).
+    pub permissions: Vec<String>,
+    /// The `org_roles` claim, the roles in the active organization. They never
+    /// count for [`Adapter::require_role`]. Empty when
+    /// [`permissions_omitted`](Self::permissions_omitted).
+    pub organization_roles: Vec<String>,
+    /// The `org_permissions` claim. Empty when
+    /// [`permissions_omitted`](Self::permissions_omitted).
+    pub organization_permissions: Vec<String>,
+    /// The token left its permissions out because they would not fit, so the
+    /// empty lists above mean "ask", not "none". [`Adapter::require_permission`]
+    /// reads the live set in that case.
+    pub permissions_omitted: bool,
 }
 
 impl User {
@@ -66,6 +82,10 @@ impl fmt::Debug for User {
             .field("token", &"[redacted]")
             .field("recovery", &self.recovery)
             .field("organization_id", &self.organization_id)
+            .field("permissions", &self.permissions)
+            .field("organization_roles", &self.organization_roles)
+            .field("organization_permissions", &self.organization_permissions)
+            .field("permissions_omitted", &self.permissions_omitted)
             .finish()
     }
 }
@@ -146,6 +166,7 @@ impl Adapter {
             inner: self.inner.clone(),
             allow_recovery: false,
             roles: Arc::from([]),
+            permissions: None,
             optional: false,
         }
     }
@@ -169,6 +190,54 @@ impl Adapter {
         }
         Ok(RequireAuthLayer {
             roles: roles.into(),
+            ..self.require_auth()
+        })
+    }
+
+    /// A layer that does what [`require_auth`](Self::require_auth) does, then
+    /// answers 403 `{"error":"insufficient_permission"}` unless the user holds at
+    /// least one of `permissions`, from the `permissions` or `org_permissions`
+    /// claim. Matching is exact: see [`PermissionRule`].
+    ///
+    /// When the token has `permissions_omitted`, each request reads the live set
+    /// from the auth API with the caller's token. If that read fails the guard
+    /// answers 503 `{"error":"permissions_unavailable"}`, and a 401 from it
+    /// answers the usual 401.
+    ///
+    /// An empty list, or an empty permission, is an error: a guard that requires
+    /// nothing must not open a route.
+    pub fn require_permission<I, T>(&self, permissions: I) -> Result<RequireAuthLayer, BuildError>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        self.require_permission_rule(PermissionRule::any(permissions))
+    }
+
+    /// Like [`require_permission`](Self::require_permission), but every one of
+    /// `permissions` must be held. Each may come from either claim.
+    pub fn require_all_permissions<I, T>(
+        &self,
+        permissions: I,
+    ) -> Result<RequireAuthLayer, BuildError>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        self.require_permission_rule(PermissionRule::all(permissions))
+    }
+
+    /// Like [`require_permission`](Self::require_permission), for a
+    /// [`PermissionRule`] with an organization scope.
+    pub fn require_permission_rule(
+        &self,
+        rule: PermissionRule,
+    ) -> Result<RequireAuthLayer, BuildError> {
+        if rule.requires_nothing() {
+            return Err(BuildError::EmptyGuard);
+        }
+        Ok(RequireAuthLayer {
+            permissions: Some(Arc::new(rule)),
             ..self.require_auth()
         })
     }
@@ -208,6 +277,12 @@ impl Inner {
             user.roles = roles(&verified);
             user.recovery = is_recovery(&verified);
             user.organization_id = optional_claim(&verified, "org_id");
+            // Read from the token, never copied to the cookie: it is already in
+            // there, and a cookie has a 4 KiB limit.
+            user.permissions = string_list(&verified, "permissions");
+            user.organization_roles = string_list(&verified, "org_roles");
+            user.organization_permissions = string_list(&verified, "org_permissions");
+            user.permissions_omitted = permissions_omitted(&verified);
             return Ok((user, true));
         }
 
@@ -233,6 +308,112 @@ impl Inner {
         }
         Ok(claims)
     }
+
+    /// The answer when `user` does not meet `rule`, or `None` when they do.
+    async fn refuse_permission(
+        &self,
+        user: &User,
+        rule: &PermissionRule,
+        route_organization: Option<&str>,
+    ) -> Option<Response> {
+        let allowed = if user.permissions_omitted {
+            match self.live_permissions(&user.token).await {
+                Ok(live) => rule.allows(live.held(), route_organization),
+                Err(LiveReadError::Unauthenticated) => {
+                    return Some(Unauthenticated.into_response());
+                }
+                Err(LiveReadError::Unavailable(why)) => {
+                    tracing::warn!("[seamless-auth] reading live permissions failed ({why}).");
+                    return Some(json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        &json!({ "error": "permissions_unavailable" }),
+                    ));
+                }
+            }
+        } else {
+            rule.allows(
+                Held {
+                    permissions: &user.permissions,
+                    organization_id: user.organization_id.as_deref(),
+                    organization_permissions: &user.organization_permissions,
+                },
+                route_organization,
+            )
+        };
+        (!allowed).then(insufficient_permission)
+    }
+
+    /// `GET /users/me/permissions` as the caller, with no cache and no retry. It
+    /// carries only the caller's token, never the service token.
+    async fn live_permissions(&self, token: &str) -> Result<LivePermissions, LiveReadError> {
+        let url = format!("{}/users/me/permissions", self.config.auth_server_url);
+        let res = self
+            .config
+            .http_client
+            .get(url)
+            .header("accept", "application/json")
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| LiveReadError::Unavailable(e.without_url().to_string()))?;
+        let status = res.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(LiveReadError::Unauthenticated);
+        }
+        if !status.is_success() {
+            return Err(LiveReadError::Unavailable(format!(
+                "HTTP {}",
+                status.as_u16()
+            )));
+        }
+        let body = read_limited(res, MAX_BODY_BYTES)
+            .await
+            .map_err(LiveReadError::Unavailable)?;
+        LivePermissions::parse(&body)
+            .ok_or_else(|| LiveReadError::Unavailable("malformed response body".into()))
+    }
+}
+
+enum LiveReadError {
+    Unauthenticated,
+    Unavailable(String),
+}
+
+struct LivePermissions {
+    permissions: Vec<String>,
+    organization_id: Option<String>,
+    organization_permissions: Vec<String>,
+}
+
+impl LivePermissions {
+    /// A claim that is not a list reads as empty, but this is the answer to a
+    /// question: a body of the wrong shape says nothing about what the user holds,
+    /// so it fails closed rather than reading as "holds nothing".
+    fn parse(body: &[u8]) -> Option<Self> {
+        let Value::Object(body) = serde_json::from_slice(body).ok()? else {
+            return None;
+        };
+        body.get("permissions")?.as_array()?;
+        body.get("organizationPermissions")?.as_array()?;
+        let organization_id = match body.get("organizationId")? {
+            Value::Null => None,
+            Value::String(id) => Some(id.clone()),
+            _ => return None,
+        };
+        Some(Self {
+            permissions: string_list(&body, "permissions"),
+            organization_id,
+            organization_permissions: string_list(&body, "organizationPermissions"),
+        })
+    }
+
+    fn held(&self) -> Held<'_> {
+        Held {
+            permissions: &self.permissions,
+            organization_id: self.organization_id.as_deref(),
+            organization_permissions: &self.organization_permissions,
+        }
+    }
 }
 
 pub(crate) fn is_recovery(claims: &Claims) -> bool {
@@ -254,30 +435,25 @@ fn user_from(claims: &Claims, token: &str) -> User {
         token: token.to_string(),
         recovery: is_recovery(claims),
         organization_id: optional_claim(claims, "org_id"),
+        permissions: string_list(claims, "permissions"),
+        organization_roles: string_list(claims, "org_roles"),
+        organization_permissions: string_list(claims, "org_permissions"),
+        permissions_omitted: permissions_omitted(claims),
     }
 }
 
 fn roles(claims: &Claims) -> Vec<String> {
-    claims
-        .get("roles")
-        .and_then(Value::as_array)
-        .map(|roles| {
-            roles
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+    string_list(claims, "roles")
 }
 
-/// The layer [`Adapter::require_auth`], [`Adapter::require_role`] and
-/// [`Adapter::optional_auth`] return.
+/// The layer [`Adapter::require_auth`], [`Adapter::require_role`],
+/// [`Adapter::require_permission`] and [`Adapter::optional_auth`] return.
 #[derive(Clone)]
 pub struct RequireAuthLayer {
     inner: Arc<Inner>,
     allow_recovery: bool,
     roles: Arc<[String]>,
+    permissions: Option<Arc<PermissionRule>>,
     optional: bool,
 }
 
@@ -298,6 +474,7 @@ impl fmt::Debug for RequireAuthLayer {
         f.debug_struct("RequireAuthLayer")
             .field("allow_recovery", &self.allow_recovery)
             .field("roles", &self.roles)
+            .field("permissions", &self.permissions)
             .field("optional", &self.optional)
             .finish_non_exhaustive()
     }
@@ -311,6 +488,7 @@ impl<S> Layer<S> for RequireAuthLayer {
             adapter: self.inner.clone(),
             allow_recovery: self.allow_recovery,
             roles: self.roles.clone(),
+            permissions: self.permissions.clone(),
             optional: self.optional,
             service,
         }
@@ -323,6 +501,7 @@ pub struct RequireAuth<S> {
     adapter: Arc<Inner>,
     allow_recovery: bool,
     roles: Arc<[String]>,
+    permissions: Option<Arc<PermissionRule>>,
     optional: bool,
     service: S,
 }
@@ -355,6 +534,7 @@ where
         let adapter = self.adapter.clone();
         let allow_recovery = self.allow_recovery;
         let roles = self.roles.clone();
+        let permissions = self.permissions.clone();
         let optional = self.optional;
 
         Box::pin(async move {
@@ -382,8 +562,23 @@ where
                     )
                 }
                 Ok((user, _)) => {
-                    req.extensions_mut().insert(user);
-                    return service.call(req).await.map(IntoResponse::into_response);
+                    let refused = match &permissions {
+                        Some(rule) => {
+                            let (request, route_organization) = rule.route_organization(req).await;
+                            req = request;
+                            adapter
+                                .refuse_permission(&user, rule, route_organization.as_deref())
+                                .await
+                        }
+                        None => None,
+                    };
+                    match refused {
+                        Some(refused) => refused,
+                        None => {
+                            req.extensions_mut().insert(user);
+                            return service.call(req).await.map(IntoResponse::into_response);
+                        }
+                    }
                 }
                 Err(rejected) => rejected.into_response(),
             };
