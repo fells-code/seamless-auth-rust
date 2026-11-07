@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/fells-code/seamless-auth-rust/compare/v0.5.0...v0.6.0) - 2026-11-06
+
+### Added
+
+- *(guard)* add an organization aware permission guard ([#40](https://github.com/fells-code/seamless-auth-rust/pull/40))
+- let verify-only resource servers require a user ([#37](https://github.com/fells-code/seamless-auth-rust/pull/37))
+
+### Fixed
+
+- keep the session cookies when a refresh fails transiently ([#39](https://github.com/fells-code/seamless-auth-rust/pull/39))
+- origin check whatever the SameSite setting, no JWKS lock across the fetch, no refresh replay ([#34](https://github.com/fells-code/seamless-auth-rust/pull/34))
+- sync the bundled adapter manifest with API 0.22.0
+
 ## [0.5.0](https://github.com/fells-code/seamless-auth-rust/compare/v0.4.0...v0.5.0) - 2026-11-01
 
 ### Added

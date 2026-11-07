@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "seamless-auth"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
