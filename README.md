@@ -234,6 +234,25 @@ cookie cannot be read. Any other failure keeps the cookies, so the next request 
 | gets a 2xx other than 200, a 200 with no session, or a session that fails verification | 502 `upstream_unavailable` |
 | does not settle within 30 seconds, or its task panics | 502 `upstream_unavailable` |
 
+#### Running several instances
+
+The sharing above lives in one process. Several adapter instances (replicas, or a rolling deploy)
+share nothing with each other, so two of them can present the same refresh token to the auth API at
+once. The auth API covers this with a short replay window: for 5 seconds after a refresh token
+rotates (`REFRESH_REPLAY_WINDOW_SECONDS` on the API, 0 disables it, capped at 60), up to 3 further
+presentations of that token each get a 200 with the same successor refresh token, session id and
+claims, and an access token of their own for the same session. Every instance then sets the same
+refresh cookie, so no instance loses the race and no user is logged out.
+
+No shared lock or cache between instances is needed while the spread between the requests and any
+clock skew between the hosts stay well under the window. A refresh token presented after the window,
+past the replay count, or after it has been rotated twice is `refresh_token_reused`: the API revokes
+the chain and answers 401, and the adapter clears the session cookies and never retries it.
+
+This needs the auth API release that ships the replay window (seamless-auth-api#613). Against an
+earlier API, the instance that loses the rotation race gets `refresh_token_reused` and its user is
+logged out.
+
 ### Errors and logout
 
 An error from the auth API goes back with its status, its JSON body and its `Retry-After` header,

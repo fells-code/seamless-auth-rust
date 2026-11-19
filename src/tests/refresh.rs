@@ -414,3 +414,103 @@ async fn a_refresh_whose_task_panics_keeps_the_session() {
     assert_unavailable("silent", &silent_refresh(&broken_adapter(true)).await);
     assert_unavailable("cookie", &cookie_refresh(&broken_adapter(true)).await);
 }
+
+/// The auth API's replay window: every presentation of `r1` inside it answers
+/// 200 with one successor, and a fresh access token carrying the same session.
+fn replay_window(api: &FakeApi, delay: Duration) -> Arc<AtomicUsize> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let url = api.url.clone();
+    api.on(
+        "POST",
+        "/refresh",
+        Arc::new(move |_| {
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            json_reply(
+                200,
+                json!({
+                    "message": "Success",
+                    "sub": "u1",
+                    "token": sign_rs256(json!({
+                        "sub": "u1", "sid": "s-1", "typ": "access",
+                        "iss": url, "aud": url, "jti": format!("call-{n}"),
+                    })),
+                    "refreshToken": "r2",
+                    "sessionId": "s-1",
+                    "refreshTtl": 3600,
+                    "ttl": 900,
+                    "roles": ["user"],
+                    "organizationId": "org-1",
+                }),
+            )
+        }),
+    );
+    calls
+}
+
+#[tokio::test]
+async fn two_adapter_instances_refreshing_one_token_both_succeed_with_the_same_successor() {
+    let api = FakeApi::start().await;
+    let calls = replay_window(&api, Duration::from_millis(100));
+    let (one, two) = (api.adapter(|b| b), api.adapter(|b| b));
+
+    let (a, b) = tokio::join!(cookie_refresh(&one), cookie_refresh(&two));
+
+    assert_eq!(a.status, 200, "{}", a.text);
+    assert_eq!(b.status, 200, "{}", b.text);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "separate instances share nothing, so each reaches the API"
+    );
+    let refresh_a = verify_hs256(&a.cookie_value("seamless-refresh"), TEST_SECRET).unwrap();
+    let refresh_b = verify_hs256(&b.cookie_value("seamless-refresh"), TEST_SECRET).unwrap();
+    assert_eq!(str_claim(&refresh_a, "refreshToken"), "r2");
+    assert_eq!(str_claim(&refresh_b, "refreshToken"), "r2");
+    for claim in ["sub", "sessionId", "refreshToken"] {
+        assert_eq!(
+            str_claim(&refresh_a, claim),
+            str_claim(&refresh_b, claim),
+            "{claim}"
+        );
+    }
+    let access_a = verify_hs256(&a.cookie_value("seamless-access"), TEST_SECRET).unwrap();
+    let access_b = verify_hs256(&b.cookie_value("seamless-access"), TEST_SECRET).unwrap();
+    assert_eq!(str_claim(&access_a, "sessionId"), "s-1");
+    assert_eq!(str_claim(&access_b, "sessionId"), "s-1");
+    assert_ne!(
+        str_claim(&access_a, "token"),
+        str_claim(&access_b, "token"),
+        "the API mints an access token per call"
+    );
+    assert_eq!(a.body, b.body);
+}
+
+#[tokio::test]
+async fn refresh_token_reused_is_terminal_and_never_retried() {
+    let api = FakeApi::start().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    api.on(
+        "POST",
+        "/refresh",
+        Arc::new(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            json_reply(401, json!({ "error": "refresh_token_reused" }))
+        }),
+    );
+    let adapter = api.adapter(|b| b);
+
+    let refreshed = cookie_refresh(&adapter).await;
+    assert_eq!(refreshed.status, 401, "{}", refreshed.text);
+    assert!(refreshed.cleared("seamless-access") && refreshed.cleared("seamless-refresh"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the refresh was retried");
+
+    let silent = silent_refresh(&api.adapter(|b| b)).await;
+    assert_eq!(silent.status, 401, "{}", silent.text);
+    assert!(silent.cleared("seamless-access") && silent.cleared("seamless-refresh"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "the refresh was retried");
+}
