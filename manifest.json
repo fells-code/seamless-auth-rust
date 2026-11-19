@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "apiVersion": "0.22.0",
+  "apiVersion": "0.23.0",
   "session": {
     "subject": "sub",
     "token": "token",
@@ -29,12 +29,41 @@
     { "method": "GET", "path": "/admin/applications/{id}/resources", "credential": "access" },
     { "method": "PUT", "path": "/admin/applications/{id}/resources", "credential": "access" },
     { "method": "POST", "path": "/admin/applications/{id}/secret", "credential": "access" },
+    { "method": "GET", "path": "/admin/audit-sinks", "credential": "access" },
+    { "method": "POST", "path": "/admin/audit-sinks", "credential": "access" },
+    { "method": "DELETE", "path": "/admin/audit-sinks/{id}", "credential": "access" },
+    { "method": "GET", "path": "/admin/audit-sinks/{id}", "credential": "access" },
+    { "method": "PATCH", "path": "/admin/audit-sinks/{id}", "credential": "access" },
+    { "method": "POST", "path": "/admin/audit-sinks/{id}/test", "credential": "access" },
     { "method": "GET", "path": "/admin/auth-events", "credential": "access" },
     { "method": "GET", "path": "/admin/auth-events/export", "credential": "access" },
     { "method": "GET", "path": "/admin/auth-events/integrity", "credential": "access" },
     { "method": "GET", "path": "/admin/credential-count", "credential": "access" },
+    { "method": "GET", "path": "/admin/custom-claims", "credential": "access" },
+    {
+      "method": "DELETE",
+      "path": "/admin/custom-claims/{sourceKind}/{sourceName}",
+      "credential": "access"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/custom-claims/{sourceKind}/{sourceName}",
+      "credential": "access"
+    },
+    {
+      "method": "PUT",
+      "path": "/admin/custom-claims/{sourceKind}/{sourceName}",
+      "credential": "access"
+    },
     { "method": "GET", "path": "/admin/enrollment", "credential": "access" },
     { "method": "POST", "path": "/admin/enrollment/invites", "credential": "access" },
+    { "method": "GET", "path": "/admin/login-hooks", "credential": "access" },
+    { "method": "DELETE", "path": "/admin/login-hooks/{trigger}", "credential": "access" },
+    { "method": "GET", "path": "/admin/login-hooks/{trigger}", "credential": "access" },
+    { "method": "PUT", "path": "/admin/login-hooks/{trigger}", "credential": "access" },
+    { "method": "GET", "path": "/admin/login-hooks/{trigger}/invocations", "credential": "access" },
+    { "method": "POST", "path": "/admin/login-hooks/{trigger}/secret", "credential": "access" },
+    { "method": "POST", "path": "/admin/login-hooks/{trigger}/test", "credential": "access" },
     { "method": "POST", "path": "/admin/organization-roles", "credential": "access" },
     { "method": "DELETE", "path": "/admin/organization-roles/{roleName}", "credential": "access" },
     { "method": "PATCH", "path": "/admin/organization-roles/{roleName}", "credential": "access" },
@@ -106,6 +135,20 @@
       "credential": "access"
     },
     { "method": "POST", "path": "/admin/users/import", "credential": "access" },
+    { "method": "GET", "path": "/admin/webhook-deliveries", "credential": "access" },
+    { "method": "GET", "path": "/admin/webhook-deliveries/{deliveryId}", "credential": "access" },
+    {
+      "method": "POST",
+      "path": "/admin/webhook-deliveries/{deliveryId}/redeliver",
+      "credential": "access"
+    },
+    { "method": "GET", "path": "/admin/webhooks", "credential": "access" },
+    { "method": "POST", "path": "/admin/webhooks", "credential": "access" },
+    { "method": "DELETE", "path": "/admin/webhooks/{id}", "credential": "access" },
+    { "method": "GET", "path": "/admin/webhooks/{id}", "credential": "access" },
+    { "method": "PATCH", "path": "/admin/webhooks/{id}", "credential": "access" },
+    { "method": "POST", "path": "/admin/webhooks/{id}/secret", "credential": "access" },
+    { "method": "POST", "path": "/admin/webhooks/{id}/test", "credential": "access" },
     { "method": "GET", "path": "/internal/auth-events/grouped", "credential": "access" },
     { "method": "GET", "path": "/internal/auth-events/login-stats", "credential": "access" },
     { "method": "GET", "path": "/internal/auth-events/summary", "credential": "access" },
