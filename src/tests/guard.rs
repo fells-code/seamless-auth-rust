@@ -497,13 +497,15 @@ async fn a_cookie_session_from_a_sibling_subdomain_needs_an_allowlisted_origin()
     );
     assert_eq!(post(&listed, None).await.status, 403);
 
+    // Without an allowlist only the request's own Host counts as a trusted Origin.
     let unlisted = api.adapter(|b| b);
     assert_eq!(
         post(&unlisted, Some("https://evil.example.com"))
             .await
             .status,
-        200
+        403
     );
+    assert_eq!(post(&unlisted, None).await.status, 403);
 }
 
 fn bearer(token: &str) -> String {

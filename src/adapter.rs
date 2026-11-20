@@ -188,7 +188,8 @@ impl Inner {
     async fn serve(self: Arc<Self>, req: Request) -> Response {
         let (parts, body) = req.into_parts();
 
-        if let Some(blocked) = check_origin(&self.config, &parts.method, &parts.headers) {
+        if let Some(blocked) = check_origin(&self.config, &parts.method, &parts.uri, &parts.headers)
+        {
             return self.write(blocked, false);
         }
 

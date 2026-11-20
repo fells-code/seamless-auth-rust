@@ -1,11 +1,16 @@
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 
 use crate::adapter::Reply;
 use crate::options::Config;
 
 /// Blocks cross-site state changes whatever the cookies' `SameSite` setting: a
 /// sibling subdomain is same-site, so `Lax` and `Strict` cookies still reach it.
-pub(crate) fn check_origin(config: &Config, method: &Method, headers: &HeaderMap) -> Option<Reply> {
+pub(crate) fn check_origin(
+    config: &Config,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+) -> Option<Reply> {
     if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
         return None;
     }
@@ -26,32 +31,33 @@ pub(crate) fn check_origin(config: &Config, method: &Method, headers: &HeaderMap
         return blocked();
     }
 
+    let trusted = |origin: &[u8]| match &config.allowed_origins {
+        Some(allowed) => is_allowed(allowed, origin),
+        None => is_own_host(origin, uri, headers),
+    };
+
     if let Some(site) = headers.get("sec-fetch-site") {
         let site = site.as_bytes();
-        if site.eq_ignore_ascii_case(b"cross-site") {
+        if site.eq_ignore_ascii_case(b"same-origin") || site.eq_ignore_ascii_case(b"none") {
+            return None;
+        }
+        // Anything else, a value this check does not know included, is treated
+        // as cross-site unless it is same-site from a trusted Origin.
+        if !site.eq_ignore_ascii_case(b"same-site") {
             return blocked();
         }
-        if !site.eq_ignore_ascii_case(b"same-site") {
-            return None;
-        }
-        let Some(allowed) = &config.allowed_origins else {
-            return None;
-        };
         return match headers.get("origin") {
-            Some(origin) if is_allowed(allowed, origin.as_bytes()) => None,
+            Some(origin) if trusted(origin.as_bytes()) => None,
             _ => blocked(),
         };
     }
 
     let origin = headers.get("origin")?;
     // An Origin a browser would never send is not one to trust.
-    if origin.to_str().is_err() {
+    if origin.to_str().is_err() || !trusted(origin.as_bytes()) {
         return blocked();
     }
-    match &config.allowed_origins {
-        Some(allowed) if !is_allowed(allowed, origin.as_bytes()) => blocked(),
-        _ => None,
-    }
+    None
 }
 
 /// Whether an Origin is on the allowlist. An Origin, or an allowlist entry, that
@@ -65,6 +71,39 @@ fn is_allowed(allowed: &[String], origin: &[u8]) -> bool {
         .iter()
         .filter_map(|allowed| normalize_origin(allowed))
         .any(|allowed| allowed == origin)
+}
+
+/// Whether the Origin names the host this request was sent to: the `Host`
+/// header, or the URI authority an HTTP/2 request carries instead. A default
+/// port written on either side does not count against a match.
+fn is_own_host(origin: &[u8], uri: &Uri, headers: &HeaderMap) -> bool {
+    let Some(origin) = std::str::from_utf8(origin).ok().and_then(normalize_origin) else {
+        return false;
+    };
+    let Some(host) = headers
+        .get("host")
+        .and_then(|host| host.to_str().ok())
+        .or_else(|| uri.authority().map(|authority| authority.as_str()))
+    else {
+        return false;
+    };
+    let host = host.trim().to_ascii_lowercase();
+    if host.is_empty() || host.contains(['@', '/', '?', '#']) {
+        return false;
+    }
+    let (scheme, authority) = origin.split_once("://").unwrap_or_default();
+    let default_port = match scheme {
+        "https" => ":443",
+        "http" => ":80",
+        _ => "",
+    };
+    let strip = |authority: &str| {
+        authority
+            .strip_suffix(default_port)
+            .unwrap_or(authority)
+            .to_string()
+    };
+    strip(authority) == strip(&host)
 }
 
 /// `scheme://host[:port]`, lowercased, or `None` for anything that is not one.

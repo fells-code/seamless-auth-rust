@@ -542,7 +542,8 @@ where
                 // A cookie session gets the same cross-site check as the auth
                 // routes, or a form on another site could act as the user.
                 Ok((_, true))
-                    if check_origin(&adapter.config, req.method(), req.headers()).is_some() =>
+                    if check_origin(&adapter.config, req.method(), req.uri(), req.headers())
+                        .is_some() =>
                 {
                     json_response(
                         StatusCode::FORBIDDEN,

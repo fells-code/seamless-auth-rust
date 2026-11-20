@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use axum::extract::Path;
 use axum::routing::get;
 use axum::{Json, Router};
-use seamless_auth::{Adapter, Delivery, PermissionRule, StepUp, TokenUser, User, Verifier};
+use seamless_auth::{
+    Adapter, Delivery, PermissionRule, SameSite, StepUp, TokenUser, User, Verifier,
+};
 use serde_json::{Value, json};
 
 type Captured = Arc<Mutex<HashMap<String, Value>>>;
@@ -25,6 +27,8 @@ async fn main() {
         .cookie_secret(env("COOKIE_SIGNING_KEY"))
         .service_secret(env("SEAMLESS_SERVICE_TOKEN"))
         .jwks_kid(env("JWKS_KID"))
+        // The conformance contract pins SameSite=None, which is no longer the default.
+        .same_site(SameSite::None)
         .deliver(move |d: Delivery| {
             let sink = sink.clone();
             async move {
