@@ -286,7 +286,20 @@ API cannot be reached.
 | `deliver_account_notices` | `false` | Your `deliver` also sends account notices (see Delivery) |
 | `trusted_proxies`, `resolve_client_ip` | the connecting peer | The end user's address. See below |
 | `disable_manifest_fetch` | `false` | Use only the manifest bundled with this version |
-| `http_client` | 15 second timeout, no redirects | Outbound `reqwest::Client` |
+| `http_timeout` | 15 seconds | Limit on each call to the auth API, set per request |
+| `configure_http_client` | none | Adjusts the outbound `reqwest::ClientBuilder` (proxy, TLS roots, DNS) |
+
+The outbound client never follows redirects: a followed redirect would carry the service token,
+and the refresh token inside it, to the redirect target. The adapter builds the client itself and
+applies `redirect::Policy::none()` after your hook, so a finished `reqwest::Client` is not
+accepted (its redirect policy cannot be changed once built):
+
+```rust
+let auth = Adapter::builder(url)
+    // ...
+    .configure_http_client(|b| b.proxy(reqwest::Proxy::https("http://proxy:3128").unwrap()))
+    .build()?;
+```
 
 ### Client IP
 
@@ -463,7 +476,9 @@ verified token answers as if no token was sent.
 The verifier finds the provider's JWKS from `<issuer>/.well-known/openid-configuration` on the
 first request (the document's `issuer` must equal yours, and its `jwks_uri` must be https under an
 https issuer), or uses `jwks_uri(...)` when you set one. If discovery or the key fetch fails, the
-request answers 401 and discovery is tried again at most every 5 seconds.
+request answers 401 and discovery is tried again at most every 5 seconds. Discovery and key fetches
+follow no redirects and time out after 5 seconds; `configure_http_client` adjusts their client the
+same way it does the adapter's.
 
 A token is accepted only when it is RS256 under a published signing key (`kid` required, the key's
 `use` and `alg` when present must be `sig` and `RS256`), with header `typ` `at+jwt`, no `crit`,
