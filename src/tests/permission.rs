@@ -892,11 +892,7 @@ async fn a_401_from_the_live_read_is_the_existing_401() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_live_read_timeout_fails_closed() {
     let api = FakeApi::start().await;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(200))
-        .build()
-        .unwrap();
-    let adapter = api.adapter(|b| b.http_client(client));
+    let adapter = api.adapter(|b| b.http_timeout(Duration::from_millis(200)));
     api.on(
         "GET",
         LIVE,

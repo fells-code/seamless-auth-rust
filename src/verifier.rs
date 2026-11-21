@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use crate::adapter::{json_response, read_limited};
 use crate::jwks::JwksCache;
 use crate::jwt::CLOCK_SKEW_SECS;
+use crate::options::{ConfigureClientFn, DEFAULT_HTTP_TIMEOUT, build_client};
 use crate::permission::{permissions_omitted, string_list};
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -117,7 +118,7 @@ pub struct VerifierBuilder {
     issuer: String,
     audience: Option<String>,
     jwks_uri: Option<String>,
-    http_client: Option<reqwest::Client>,
+    configure_http_client: Option<ConfigureClientFn>,
     confirm: Option<ConfirmFn>,
     now: Option<ClockFn>,
 }
@@ -140,7 +141,7 @@ impl Verifier {
             issuer: issuer.into(),
             audience: None,
             jwks_uri: None,
-            http_client: None,
+            configure_http_client: None,
             confirm: None,
             now: None,
         }
@@ -162,10 +163,15 @@ impl VerifierBuilder {
         self
     }
 
-    /// The client for discovery and key fetches. The default follows no
-    /// redirects.
-    pub fn http_client(mut self, client: reqwest::Client) -> Self {
-        self.http_client = Some(client);
+    /// Adjusts the client for discovery and key fetches (proxy, TLS roots, DNS).
+    /// Whatever the hook sets, the client follows no redirects. A finished
+    /// `reqwest::Client` is not accepted because its redirect policy cannot be
+    /// changed after it is built.
+    pub fn configure_http_client<F>(mut self, configure: F) -> Self
+    where
+        F: FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync + 'static,
+    {
+        self.configure_http_client = Some(Box::new(configure));
         self
     }
 
@@ -201,14 +207,8 @@ impl VerifierBuilder {
         {
             return Err(VerifierBuildError::InvalidJwksUri);
         }
-        let client = match self.http_client {
-            Some(client) => client,
-            None => reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|e| VerifierBuildError::HttpClient(e.to_string()))?,
-        };
+        let client = build_client(self.configure_http_client, DEFAULT_HTTP_TIMEOUT)
+            .map_err(|e| VerifierBuildError::HttpClient(e.to_string()))?;
         let keys = KeySource {
             jwks: self
                 .jwks_uri

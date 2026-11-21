@@ -351,6 +351,7 @@ impl Inner {
             .config
             .http_client
             .get(url)
+            .timeout(self.config.http_timeout)
             .header("accept", "application/json")
             .bearer_auth(token)
             .send()

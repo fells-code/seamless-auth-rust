@@ -42,6 +42,25 @@ impl SameSite {
     }
 }
 
+pub(crate) type ConfigureClientFn =
+    Box<dyn FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync>;
+
+pub(crate) const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Builds an outbound client from the caller's settings. The redirect policy is
+/// applied last so no hook can turn redirects back on: a followed redirect would
+/// carry the service token, and the refresh token inside it, to the target.
+pub(crate) fn build_client(
+    configure: Option<ConfigureClientFn>,
+    timeout: Duration,
+) -> Result<reqwest::Client, reqwest::Error> {
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+    if let Some(configure) = configure {
+        builder = configure(builder);
+    }
+    builder.redirect(reqwest::redirect::Policy::none()).build()
+}
+
 pub(crate) type DeliverFn = Arc<dyn Fn(Delivery) -> DeliveryFuture + Send + Sync>;
 pub(crate) type ClientIpFn =
     Arc<dyn Fn(&HeaderMap, Option<IpAddr>) -> Option<IpAddr> + Send + Sync>;
@@ -125,7 +144,8 @@ pub struct Builder {
     deliver_account_notices: bool,
     client_ip: Option<ClientIpFn>,
     disable_manifest_fetch: bool,
-    http_client: Option<reqwest::Client>,
+    configure_http_client: Option<ConfigureClientFn>,
+    http_timeout: Duration,
 }
 
 impl fmt::Debug for Builder {
@@ -160,7 +180,8 @@ impl Builder {
             deliver_account_notices: false,
             client_ip: None,
             disable_manifest_fetch: false,
-            http_client: None,
+            configure_http_client: None,
+            http_timeout: DEFAULT_HTTP_TIMEOUT,
         }
     }
 
@@ -306,11 +327,23 @@ impl Builder {
         self
     }
 
-    /// The client for calls to the auth API. The default has a 15 second timeout
-    /// and follows no redirects. A client that follows redirects would carry the
-    /// service token to wherever the auth API pointed it.
-    pub fn http_client(mut self, client: reqwest::Client) -> Self {
-        self.http_client = Some(client);
+    /// Adjusts the client for calls to the auth API (proxy, TLS roots, DNS).
+    /// Whatever the hook sets, the client follows no redirects: one would carry
+    /// the service token to wherever the response pointed. A finished
+    /// `reqwest::Client` is not accepted because its redirect policy cannot be
+    /// changed after it is built.
+    pub fn configure_http_client<F>(mut self, configure: F) -> Self
+    where
+        F: FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync + 'static,
+    {
+        self.configure_http_client = Some(Box::new(configure));
+        self
+    }
+
+    /// The limit on each call to the auth API. Defaults to 15 seconds, and is set
+    /// on every request so a hook cannot remove it.
+    pub fn http_timeout(mut self, timeout: Duration) -> Self {
+        self.http_timeout = timeout;
         self
     }
 
@@ -388,14 +421,8 @@ impl Builder {
         });
         let same_site = self.same_site.unwrap_or(SameSite::Lax);
 
-        let http_client = match self.http_client {
-            Some(client) => client,
-            None => reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|e| BuildError::HttpClient(e.to_string()))?,
-        };
+        let http_client = build_client(self.configure_http_client, self.http_timeout)
+            .map_err(|e| BuildError::HttpClient(e.to_string()))?;
 
         Ok(Adapter::from_config(Config {
             auth_server_url,
@@ -417,6 +444,7 @@ impl Builder {
             client_ip: self.client_ip,
             fetch_manifest: !self.disable_manifest_fetch,
             http_client,
+            http_timeout: self.http_timeout,
         }))
     }
 }
@@ -447,6 +475,7 @@ pub(crate) struct Config {
     pub client_ip: Option<ClientIpFn>,
     pub fetch_manifest: bool,
     pub http_client: reqwest::Client,
+    pub http_timeout: Duration,
 }
 
 impl Config {

@@ -1041,6 +1041,42 @@ async fn redirects_from_the_api_are_not_followed() {
     assert!(api.calls_to("POST", "/elsewhere").is_empty());
 }
 
+// A hook that asks for redirects still gets none: the service token, and the
+// refresh token inside it, must never reach the listener a 302 points at.
+#[tokio::test]
+async fn a_302_to_another_listener_never_receives_the_service_token() {
+    let api = FakeApi::start().await;
+    let elsewhere = FakeApi::start().await;
+    elsewhere.on("POST", "/stolen", respond(200, json!({})));
+    elsewhere.on("GET", "/stolen", respond(200, json!({})));
+    let target = format!("{}/stolen", elsewhere.url);
+    api.on(
+        "POST",
+        "/login",
+        Arc::new(move |_| {
+            let mut res = Response::new(Body::empty());
+            *res.status_mut() = axum::http::StatusCode::FOUND;
+            res.headers_mut()
+                .insert("location", HeaderValue::from_str(&target).unwrap());
+            res
+        }),
+    );
+    let adapter = api.adapter(|b| {
+        b.configure_http_client(|c| c.redirect(reqwest::redirect::Policy::limited(10)))
+    });
+
+    let r = call("POST", "/login").body("{}").to(&adapter).await;
+
+    assert_eq!(r.status, 302);
+    assert!(
+        !api.calls_to("POST", "/login")[0]
+            .header("x-seamless-service-token")
+            .is_empty()
+    );
+    assert!(elsewhere.calls_to("POST", "/stolen").is_empty());
+    assert!(elsewhere.calls_to("GET", "/stolen").is_empty());
+}
+
 #[tokio::test]
 async fn cookies_only_count_in_their_own_slot() {
     let api = FakeApi::start().await;
