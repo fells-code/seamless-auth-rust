@@ -32,11 +32,13 @@ async fn a_same_site_form_post_under_lax_cookies_is_refused() {
 
     let r = form_post()
         .header("sec-fetch-site", "same-site")
+        .header("host", "auth.example.com")
         .header("origin", "https://evil.example.com")
         .to(&adapter)
         .await;
 
-    assert_eq!(r.status, 415, "{}", r.text);
+    assert_eq!(r.status, 403, "{}", r.text);
+    assert_eq!(r.body, json!({ "error": "cross_site_request_blocked" }));
     assert!(api.calls_to("POST", "/recovery-codes").is_empty());
 }
 
@@ -46,12 +48,45 @@ async fn a_form_post_without_fetch_metadata_is_refused() {
     let adapter = api.adapter(|b| b.same_site(SameSite::Lax));
 
     let r = form_post()
+        .header("host", "auth.example.com")
         .header("origin", "https://evil.example")
         .to(&adapter)
         .await;
 
-    assert_eq!(r.status, 415, "{}", r.text);
+    assert_eq!(r.status, 403, "{}", r.text);
+    assert_eq!(r.body, json!({ "error": "cross_site_request_blocked" }));
     assert!(api.calls_to("POST", "/recovery-codes").is_empty());
+}
+
+#[tokio::test]
+async fn without_an_allowlist_an_origin_must_match_the_host() {
+    let api = started().await;
+    let adapter = api.adapter(|b| b);
+
+    // A form on the same host still meets the content-type gate.
+    let r = form_post()
+        .header("host", "auth.example.com")
+        .header("origin", "https://auth.example.com")
+        .to(&adapter)
+        .await;
+    assert_eq!(r.status, 415, "{}", r.text);
+
+    let r = form_post()
+        .header("host", "auth.example.com")
+        .header("origin", "https://auth.example.com")
+        .header("content-type", "application/json")
+        .to(&adapter)
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text);
+
+    // An HTTP/2 request names its host in the URI authority, not a Host header.
+    let r = call("POST", "https://auth.example.com/recovery-codes")
+        .cookie(&access())
+        .header("origin", "https://auth.example.com")
+        .header("content-type", "application/json")
+        .to(&adapter)
+        .await;
+    assert_eq!(r.status, 200, "authority: {}", r.text);
 }
 
 #[tokio::test]

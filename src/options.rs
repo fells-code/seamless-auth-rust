@@ -212,17 +212,18 @@ impl Builder {
         self
     }
 
-    /// The cookie `SameSite` attribute. Defaults to `None`, or `Lax` with
-    /// [`insecure_cookies`](Self::insecure_cookies).
+    /// The cookie `SameSite` attribute. Defaults to `Lax`. A frontend on another
+    /// site that calls the adapter with credentials needs `None`.
     pub fn same_site(mut self, same_site: SameSite) -> Self {
         self.same_site = Some(same_site);
         self
     }
 
-    /// The only cross-origin callers allowed to change state. With it set, a
+    /// The only cross-origin callers allowed to change state. A
     /// `Sec-Fetch-Site: same-site` request (which includes a sibling subdomain),
     /// or a request without fetch metadata that carries an `Origin`, needs that
-    /// `Origin` on the list. An empty list allows no cross-origin caller.
+    /// `Origin` on the list. Without the list that `Origin` must name the request's
+    /// own `Host`. An empty list allows no cross-origin caller.
     pub fn allowed_origins<I, S>(mut self, origins: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -385,11 +386,7 @@ impl Builder {
             );
             "dev-main".to_string()
         });
-        let same_site = self.same_site.unwrap_or(if self.insecure_cookies {
-            SameSite::Lax
-        } else {
-            SameSite::None
-        });
+        let same_site = self.same_site.unwrap_or(SameSite::Lax);
 
         let http_client = match self.http_client {
             Some(client) => client,

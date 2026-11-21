@@ -53,7 +53,7 @@ async fn login_stores_the_pre_auth_token_and_picks_the_body() {
     let cookie = &r.cookies["seamless-ephemeral"];
     assert_eq!(attribute(cookie, "Max-Age"), Some("300"));
     assert_eq!(attribute(cookie, "Path"), Some("/"));
-    assert_eq!(attribute(cookie, "SameSite"), Some("None"));
+    assert_eq!(attribute(cookie, "SameSite"), Some("Lax"));
     assert!(
         flag(cookie, "HttpOnly") && flag(cookie, "Secure"),
         "{cookie}"
@@ -685,7 +685,7 @@ async fn the_origin_guard_follows_sec_fetch_site() {
         &'a [(&'a str, &'a str)],
         bool,
     );
-    let cases: [Case; 17] = [
+    let cases: [Case; 27] = [
         (
             "cross-site",
             &open,
@@ -708,11 +708,111 @@ async fn the_origin_guard_follows_sec_fetch_site() {
             false,
         ),
         (
-            "same-site without an allowlist",
+            "same-site without an allowlist or Origin",
             &open,
             "POST",
             &[("sec-fetch-site", "same-site")],
+            true,
+        ),
+        (
+            "same-site without an allowlist, from a sibling",
+            &open,
+            "POST",
+            &[
+                ("sec-fetch-site", "same-site"),
+                ("host", "auth.example.com"),
+                ("origin", "https://app.example.com"),
+            ],
+            true,
+        ),
+        (
+            "same-site without an allowlist, from the Host",
+            &open,
+            "POST",
+            &[
+                ("sec-fetch-site", "same-site"),
+                ("host", "auth.example.com"),
+                ("origin", "https://AUTH.example.com"),
+            ],
             false,
+        ),
+        (
+            "an unknown Sec-Fetch-Site",
+            &open,
+            "POST",
+            &[
+                ("sec-fetch-site", "same-planet"),
+                ("host", "auth.example.com"),
+                ("origin", "https://auth.example.com"),
+            ],
+            true,
+        ),
+        (
+            "no Sec-Fetch-Site, an Origin and no allowlist",
+            &open,
+            "POST",
+            &[
+                ("host", "auth.example.com"),
+                ("origin", "https://evil.example"),
+            ],
+            true,
+        ),
+        (
+            "no Sec-Fetch-Site, an Origin and no Host",
+            &open,
+            "POST",
+            &[("origin", "https://auth.example.com")],
+            true,
+        ),
+        (
+            "no Sec-Fetch-Site, the Host's Origin",
+            &open,
+            "POST",
+            &[
+                ("host", "auth.example.com"),
+                ("origin", "https://auth.example.com"),
+            ],
+            false,
+        ),
+        (
+            "no Sec-Fetch-Site, the Host's Origin with the default port",
+            &open,
+            "POST",
+            &[
+                ("host", "auth.example.com:443"),
+                ("origin", "https://auth.example.com"),
+            ],
+            false,
+        ),
+        (
+            "no Sec-Fetch-Site, the Host on another port",
+            &open,
+            "POST",
+            &[
+                ("host", "auth.example.com:8443"),
+                ("origin", "https://auth.example.com"),
+            ],
+            true,
+        ),
+        (
+            "no Sec-Fetch-Site, a scheme's default port on another scheme",
+            &open,
+            "POST",
+            &[
+                ("host", "auth.example.com:80"),
+                ("origin", "https://auth.example.com"),
+            ],
+            true,
+        ),
+        (
+            "no Sec-Fetch-Site, a Host with userinfo",
+            &open,
+            "POST",
+            &[
+                ("host", "evil@auth.example.com"),
+                ("origin", "https://auth.example.com"),
+            ],
+            true,
         ),
         ("none", &open, "POST", &[("sec-fetch-site", "none")], false),
         ("server to server", &open, "POST", &[], false),

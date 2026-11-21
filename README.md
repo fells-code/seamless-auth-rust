@@ -92,12 +92,15 @@ applies whatever the cookies' `SameSite` setting (a sibling subdomain is same-si
 
 - A `null` `Origin` (in any case) is refused first, whatever `Sec-Fetch-Site` and
   `allowed_origins` say.
-- `Sec-Fetch-Site: cross-site` is refused, and `same-origin` (or `none`) passes.
-- `Sec-Fetch-Site: same-site` also covers a sibling subdomain, so when `allowed_origins` is set
-  the `Origin` must be on it, and a request with no `Origin` is refused. Without
-  `allowed_origins` it passes.
+- `Sec-Fetch-Site: same-origin` (or `none`) passes. `cross-site`, and any value this check does
+  not know, is refused.
+- `Sec-Fetch-Site: same-site` also covers a sibling subdomain, so the `Origin` must be trusted, and
+  a request with no `Origin` is refused.
 - With no `Sec-Fetch-Site` (an older browser or a server), a request with no `Origin` passes, and
-  when `allowed_origins` is set the `Origin` must be on it.
+  one with an `Origin` needs it trusted.
+- A trusted `Origin` is one on `allowed_origins` when that is set. Without it, only the request's
+  own host is trusted: the `Origin`'s `host[:port]` must equal the `Host` header (or the HTTP/2
+  authority), a default port aside. Behind a proxy that rewrites `Host`, set `allowed_origins`.
 - An empty `allowed_origins` is still set: it allows no cross-origin caller.
 
 A bearer token is never attached by a browser, so it is not checked.
@@ -275,8 +278,8 @@ API cannot be reached.
 | `jwks_kid` | `dev-main` | `kid` header on service tokens |
 | `cookie_domain` | none | Cookie `Domain` |
 | `insecure_cookies` | `false` | Drops `Secure`, for local development over HTTP, and allows example secrets |
-| `same_site` | `None`, or `Lax` with `insecure_cookies` | Cookie `SameSite` |
-| `allowed_origins` | none | The only cross-origin (including same-site) callers allowed to change state; an empty list allows none |
+| `same_site` | `Lax` | Cookie `SameSite`; a frontend on another site needs `None` |
+| `allowed_origins` | none (only the request's own `Host`) | The only cross-origin (including same-site) callers allowed to change state; an empty list allows none |
 | `session_cookie_names` | `seamless-access`, `seamless-refresh` | Session cookie names |
 | `flow_cookie_names` | `seamless-ephemeral` | Sign-in flow cookie names |
 | `deliver` | none | Sends OTP codes and magic links through your own transports |
