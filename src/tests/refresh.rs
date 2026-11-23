@@ -390,15 +390,11 @@ impl reqwest::dns::Resolve for BrokenResolver {
 }
 
 fn broken_adapter(panics: bool) -> crate::Adapter {
-    let client = reqwest::Client::builder()
-        .dns_resolver(BrokenResolver { panics })
-        .build()
-        .unwrap();
     crate::Adapter::builder("http://auth.invalid")
         .cookie_secret(TEST_SECRET)
         .service_secret(TEST_SERVICE)
         .disable_manifest_fetch(true)
-        .http_client(client)
+        .configure_http_client(move |b| b.dns_resolver(BrokenResolver { panics }))
         .build()
         .unwrap()
 }

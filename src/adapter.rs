@@ -319,6 +319,7 @@ impl Inner {
             .config
             .http_client
             .request(call.method.clone(), url)
+            .timeout(self.config.http_timeout)
             .header("accept", "application/json");
         if let Some(body) = call.body.filter(|_| call.method != Method::GET) {
             req = req.header("content-type", "application/json").body(body);
